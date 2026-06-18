@@ -202,50 +202,40 @@ def parse_karinouhin(fileobj):
                     d = parse_date(c)
                     if d:
                         date_votes.append(d)
-        # 品名&数量を含むヘッダー行を全て検出
-        headers = []
+        # 最初の「品名&数量」ヘッダー = 仮納品書の明細ブロック。
+        # 最初の「合計」で止めるので、続く受領書ブロックは読まない（＝二重計上しない）。
+        hidx, cmap = None, None
         for i, row in enumerate(rows):
             nc = [normalize(c) for c in row]
             if any("品名" in c for c in nc) and any("数量" in c for c in nc):
-                headers.append((i, _colmap_kari(nc)))
-        for hi, cmap in headers:
-            if "品名" not in cmap or "数量" not in cmap:
+                hidx, cmap = i, _colmap_kari(nc)
+                break
+        if hidx is None or "品名" not in cmap or "数量" not in cmap:
+            continue
+        pcol, qcol = cmap["品名"], cmap["数量"]
+        lcol, bcol = cmap.get("lot"), cmap.get("備考")
+        for row in rows[hidx + 1:]:
+            name = row[pcol] if pcol < len(row) else None
+            nn = normalize(name)
+            if "合計" in nn or "受領" in nn:
+                break  # 仮納品書ブロックの終端で停止（受領書は読まない）
+            if not nn:
                 continue
-            # ブロック種別: ヘッダー上方8行に「受領」があれば受領書→無視
-            is_juryo = False
-            for k in range(hi, max(-1, hi - 8), -1):
-                joined = "".join(normalize(c) for c in rows[k])
-                if "受領" in joined:
-                    is_juryo = True
-                    break
-                if "納品書" in joined:
-                    break
-            if is_juryo:
+            qty = first_num(row[qcol]) if qcol < len(row) else None
+            lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
+            bikou = row[bcol] if (bcol is not None and bcol < len(row)) else None
+            rec = {
+                "製品名": str(name).strip(),
+                "数量": int(qty) if qty is not None else "",
+                "Lot": str(lot).strip() if lot else "",
+                "備考": str(bikou).strip() if bikou else "",
+                "シート": ws.title,
+            }
+            if is_shizai(name):
+                excluded.append({**rec, "除外理由": "資材/残資材"})
                 continue
-            pcol, qcol = cmap["品名"], cmap["数量"]
-            lcol, bcol = cmap.get("lot"), cmap.get("備考")
-            for row in rows[hi + 1:]:
-                name = row[pcol] if pcol < len(row) else None
-                nn = normalize(name)
-                if "合計" in nn or "受領" in nn or "品名" in nn:
-                    break  # 合計 / 受領書 / 次ブロックのヘッダーで終端
-                if not nn:
-                    continue
-                qty = first_num(row[qcol]) if qcol < len(row) else None
-                lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
-                bikou = row[bcol] if (bcol is not None and bcol < len(row)) else None
-                rec = {
-                    "製品名": str(name).strip(),
-                    "数量": int(qty) if qty is not None else "",
-                    "Lot": str(lot).strip() if lot else "",
-                    "備考": str(bikou).strip() if bikou else "",
-                    "シート": ws.title,
-                }
-                if is_shizai(name):
-                    excluded.append({**rec, "除外理由": "資材/残資材"})
-                    continue
-                rec["数量"] = qty  # 数量が空でも除外しない（後段で「要確認」に回す）
-                items.append(rec)
+            rec["数量"] = qty  # 数量が空でも除外しない（後段で「要確認」に回す）
+            items.append(rec)
     kari_date = Counter(date_votes).most_common(1)[0][0] if date_votes else None
     return items, excluded, kari_date
 
