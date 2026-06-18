@@ -319,25 +319,27 @@ _WIDTHS = {"製品名": 34, "ロット": 10, "出荷数": 9, "商品CD": 11,
            "処方番号": 16, "単価": 9, "金額": 12, "要確認": 8, "メモ": 42}
 _NUMCOLS = {"単価", "金額", "出荷数"}
 
+def display_header(col):
+    """ヘッダー表示名。ケース列は先頭だけ「ケース」、2列目以降は空欄にする。"""
+    if col.startswith("ケース"):
+        return "ケース" if col == "ケース①" else ""
+    return col
+
 def to_workbook(rows, colorder, date_label=""):
     wb = Workbook()
     ws = wb.active
     ws.title = "出荷連絡表(単価入り)"
-    brand = PatternFill("solid", fgColor="B83280")
-    hdrfill = PatternFill("solid", fgColor="AD1457")
-    warn = PatternFill("solid", fgColor="FFEBEE")
-    thin = Side(style="thin", color="E7C9D6")
+    thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     last = ws.cell(row=1, column=len(colorder)).column_letter
     ws.merge_cells("A1:%s1" % last)
     ws["A1"] = "出荷連絡表　%s" % date_label
-    ws["A1"].fill = brand
-    ws["A1"].font = Font(name="Yu Gothic", color="FFFFFF", bold=True, size=14)
+    ws["A1"].font = Font(name="Yu Gothic", bold=True, size=14)
     ws["A1"].alignment = Alignment(vertical="center", indent=1)
     ws.row_dimensions[1].height = 30
     for j, h in enumerate(colorder, 1):
-        c = ws.cell(row=2, column=j, value=h)
-        c.fill = hdrfill; c.font = Font(name="Yu Gothic", color="FFFFFF", bold=True)
+        c = ws.cell(row=2, column=j, value=display_header(h))
+        c.font = Font(name="Yu Gothic", bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center"); c.border = border
     for i, r in enumerate(rows, 3):
         for j, k in enumerate(colorder, 1):
@@ -348,9 +350,6 @@ def to_workbook(rows, colorder, date_label=""):
                 c.alignment = Alignment(horizontal="right", vertical="top")
             else:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
-        if r.get("要確認"):
-            for j in range(1, len(colorder) + 1):
-                ws.cell(row=i, column=j).fill = warn
     for j, k in enumerate(colorder, 1):
         ws.column_dimensions[ws.cell(row=2, column=j).column_letter].width = _WIDTHS.get(k, 12)
     ws.freeze_panes = "A3"

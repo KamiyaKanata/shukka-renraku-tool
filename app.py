@@ -81,10 +81,17 @@ if go and kari and master:
 
     st.markdown("#### 出荷連絡表（プレビュー・全文表示）")
     df = pd.DataFrame(rows)[colorder]
-    def _hl(row):
-        return ['background-color:#FFE3EC' if row["要確認"] == "要確認" else '' for _ in row]
-    # st.table は折り返して全行・全文を表示（途中で切れない）
-    st.table(df.style.apply(_hl, axis=1).hide(axis="index"))
+    # ケース列の表示名は先頭だけ「ケース」、2列目以降は空欄（列名の一意性は半角スペース数で確保）
+    labels, blank_n = [], 0
+    for c in colorder:
+        if c.startswith("ケース") and c != "ケース①":
+            blank_n += 1
+            labels.append(" " * blank_n)
+        else:
+            labels.append(engine.display_header(c))
+    df.columns = labels
+    # st.table は折り返して全行・全文を表示（途中で切れない）。色は付けない。
+    st.table(df.style.hide(axis="index"))
 
     bio = engine.to_workbook(rows, colorder, stats["出荷日"])
     st.download_button(
