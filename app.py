@@ -46,7 +46,8 @@ with st.sidebar:
         "・単価は品名＋数量（ロット閾値）で自動ひも付け\n"
         "・引けない／曖昧な行は **🔶要確認** で色付け表示"
     )
-    date_label = st.text_input("出荷日ラベル（任意・出力見出しに表示）", value="")
+    date_label = st.text_input("出荷日（空欄なら仮納品書から自動取得）", value="",
+                               help="例: 2026-06-08。空欄のままなら仮納品書の日付を自動で使います。")
 
 c1, c2 = st.columns(2)
 with c1:
@@ -70,6 +71,9 @@ if go and kari and master:
     m3.metric("仮納品書 明細(資材除外後)", stats["仮納品書 明細数(資材除外後)"])
     m4.metric("マスタ商品数", stats["マスタ商品数"])
 
+    _src = "仮納品書から自動取得" if stats.get("日付自動取得") else ("手入力" if date_label.strip() else "本日")
+    st.caption(f"📅 出荷日: **{stats['出荷日']}**（{_src}）")
+
     if stats["要確認 行数"]:
         st.warning(f"🔶 {stats['要確認 行数']} 行が「要確認」です（単価未取得・数量帯外・名前衝突など）。下表の色付き行をご確認ください。")
     else:
@@ -82,11 +86,11 @@ if go and kari and master:
     # st.table は折り返して全行・全文を表示（途中で切れない）
     st.table(df.style.apply(_hl, axis=1).hide(axis="index"))
 
-    bio = engine.to_workbook(rows, colorder, date_label)
+    bio = engine.to_workbook(rows, colorder, stats["出荷日"])
     st.download_button(
-        "⬇️ 出荷連絡表（単価入り）をダウンロード",
+        "⬇️ 出荷連絡表をダウンロード",
         data=bio.getvalue(),
-        file_name=f"出荷連絡表_単価入り_{date_label or '出力'}.xlsx",
+        file_name=f"出荷連絡表_{stats['出荷日']}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )

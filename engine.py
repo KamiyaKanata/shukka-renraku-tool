@@ -18,7 +18,7 @@ import csv
 import io
 import unicodedata
 import datetime
-from collections import defaultdict
+from collections import defaultdict, Counter
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -43,10 +43,16 @@ def parse_date(s):
     if isinstance(s, (datetime.date, datetime.datetime)):
         return s if isinstance(s, datetime.date) else s.date()
     s = unicodedata.normalize("NFKC", str(s))
-    m = re.search(r"(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})", s)
+    m = re.search(r"(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})", s)  # YYYY/M/D
     if m:
         try:
             return datetime.date(int(m.group(1)), int(m.group(2)), int(m.group(3)))
+        except ValueError:
+            return None
+    m = re.search(r"(\d{1,2})[./\-](\d{1,2})[./\-](\d{4})", s)  # M/D/YYYY（仮納品書の日付）
+    if m:
+        try:
+            return datetime.date(int(m.group(3)), int(m.group(1)), int(m.group(2)))
         except ValueError:
             return None
     return None
@@ -186,9 +192,16 @@ def parse_karinouhin(fileobj):
     """仮納品書を解析。1シートに複数の納品先ブロックがあっても全て拾い、
     受領書ブロックは無視する。(items, excluded) を返す。"""
     wb = load_workbook(fileobj, data_only=True, read_only=True)
-    items, excluded = [], []
+    items, excluded, date_votes = [], [], []
     for ws in wb.worksheets:
         rows = list(ws.iter_rows(values_only=True))
+        # 「日付」を含む行から出荷日を採取（メモ等の日付を拾わないようヘッダー付近に限定）
+        for row in rows[:14]:
+            if any("日付" in normalize(c) for c in row):
+                for c in row:
+                    d = parse_date(c)
+                    if d:
+                        date_votes.append(d)
         # 品名&数量を含むヘッダー行を全て検出
         headers = []
         for i, row in enumerate(rows):
@@ -236,7 +249,8 @@ def parse_karinouhin(fileobj):
                     continue
                 rec["数量"] = qty
                 items.append(rec)
-    return items, excluded
+    kari_date = Counter(date_votes).most_common(1)[0][0] if date_votes else None
+    return items, excluded, kari_date
 
 # ================= 集計・突合 =================
 def parse_case_terms(text):
@@ -316,7 +330,7 @@ def to_workbook(rows, colorder, date_label=""):
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     last = ws.cell(row=1, column=len(colorder)).column_letter
     ws.merge_cells("A1:%s1" % last)
-    ws["A1"] = "出荷連絡表（単価入り）　%s" % date_label
+    ws["A1"] = "出荷連絡表　%s" % date_label
     ws["A1"].fill = brand
     ws["A1"].font = Font(name="Yu Gothic", color="FFFFFF", bold=True, size=14)
     ws["A1"].alignment = Alignment(vertical="center", indent=1)
@@ -346,14 +360,18 @@ def to_workbook(rows, colorder, date_label=""):
 # ================= 一括処理 =================
 def generate(karinouhin_fileobj, master_fileobj, master_filename, date_label=""):
     master_index, n = load_master(master_fileobj, master_filename)
-    items, excluded = parse_karinouhin(karinouhin_fileobj)
+    items, excluded, kari_date = parse_karinouhin(karinouhin_fileobj)
     agg = aggregate(items)
     rows, colorder = build_rows(agg, master_index)
+    # 出荷日: ユーザー入力 > 仮納品書から自動取得 > 本日（必ず日付を付ける）
+    eff_date = (date_label or "").strip() or (kari_date.isoformat() if kari_date else datetime.date.today().isoformat())
     stats = {
         "マスタ商品数": n,
         "仮納品書 明細数(資材除外後)": len(items),
         "出荷連絡表 行数": len(rows),
         "要確認 行数": sum(1 for r in rows if r["要確認"]),
+        "出荷日": eff_date,
+        "日付自動取得": bool(kari_date),
     }
     debug = {"items": items, "excluded": excluded}
     return rows, colorder, stats, debug
@@ -365,7 +383,7 @@ if __name__ == "__main__":
     with open(master, "rb") as mf:
         midx, n = load_master(mf, master)
     with open(kari, "rb") as kf:
-        items, excluded = parse_karinouhin(kf)
+        items, excluded, _ = parse_karinouhin(kf)
     rows, colorder = build_rows(aggregate(items), midx)
     print("マスタ商品数:", n, "/ 仮納品書明細:", len(items), "/ 除外:", len(excluded), "/ 出力行:", len(rows))
     print("列:", " | ".join(colorder))
