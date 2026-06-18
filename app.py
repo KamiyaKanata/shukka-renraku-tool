@@ -59,7 +59,7 @@ go = st.button("🚀 出荷連絡表を生成", type="primary", disabled=not (ka
 if go and kari and master:
     try:
         with st.spinner("解析中…（マスタが大きい場合は数十秒かかります）"):
-            rows, stats = engine.generate(kari, master, master.name, date_label)
+            rows, colorder, stats, debug = engine.generate(kari, master, master.name, date_label)
     except Exception as e:
         st.error(f"処理でエラーが発生しました: {e}")
         st.stop()
@@ -75,12 +75,14 @@ if go and kari and master:
     else:
         st.success("✅ すべての行で単価をひも付けできました。")
 
-    df = pd.DataFrame(rows)[engine.HDR]
+    st.markdown("#### 出荷連絡表（プレビュー・全文表示）")
+    df = pd.DataFrame(rows)[colorder]
     def _hl(row):
         return ['background-color:#FFE3EC' if row["要確認"] == "要確認" else '' for _ in row]
-    st.dataframe(df.style.apply(_hl, axis=1), use_container_width=True, height=460)
+    # st.table は折り返して全行・全文を表示（途中で切れない）
+    st.table(df.style.apply(_hl, axis=1).hide(axis="index"))
 
-    bio = engine.to_workbook(rows, date_label)
+    bio = engine.to_workbook(rows, colorder, date_label)
     st.download_button(
         "⬇️ 出荷連絡表（単価入り）をダウンロード",
         data=bio.getvalue(),
@@ -88,5 +90,11 @@ if go and kari and master:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         type="primary",
     )
+
+    with st.expander(f"🔍 解析の内訳（読めた明細 {len(debug['items'])} 件 / 除外 {len(debug['excluded'])} 件）— 「商品が乗らない」原因の確認用"):
+        st.markdown("**① 仮納品書から読み込んだ明細（資材除外後）** — ここに無い商品は仮納品書の読み取りで拾えていません")
+        st.table(pd.DataFrame(debug["items"]) if debug["items"] else pd.DataFrame({"(なし)": []}))
+        st.markdown("**② 除外した行（資材・残資材・数量なし等）**")
+        st.table(pd.DataFrame(debug["excluded"]) if debug["excluded"] else pd.DataFrame({"(なし)": []}))
 else:
     st.info("①②の両方をアップロードすると「生成」できます。")

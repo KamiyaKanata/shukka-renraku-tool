@@ -18,6 +18,7 @@ import csv
 import io
 import unicodedata
 import datetime
+from collections import defaultdict
 from openpyxl import load_workbook, Workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -168,88 +169,143 @@ def select_price(entries, qty):
     return chosen, flags
 
 # ================= 仮納品書 読み込み =================
+def _colmap_kari(nc):
+    cmap = {}
+    for j, c in enumerate(nc):
+        if "品名" in c and "品名" not in cmap:
+            cmap["品名"] = j
+        if "数量" in c and "数量" not in cmap:
+            cmap["数量"] = j
+        if ("lot" in c or "ロット" in c) and "lot" not in cmap:
+            cmap["lot"] = j
+        if "備考" in c and "備考" not in cmap:
+            cmap["備考"] = j
+    return cmap
+
 def parse_karinouhin(fileobj):
+    """仮納品書を解析。1シートに複数の納品先ブロックがあっても全て拾い、
+    受領書ブロックは無視する。(items, excluded) を返す。"""
     wb = load_workbook(fileobj, data_only=True, read_only=True)
-    items = []
+    items, excluded = [], []
     for ws in wb.worksheets:
         rows = list(ws.iter_rows(values_only=True))
-        hidx, cmap = None, None
+        # 品名&数量を含むヘッダー行を全て検出
+        headers = []
         for i, row in enumerate(rows):
             nc = [normalize(c) for c in row]
             if any("品名" in c for c in nc) and any("数量" in c for c in nc):
-                cmap = {}
-                for j, c in enumerate(nc):
-                    if "品名" in c and "品名" not in cmap:
-                        cmap["品名"] = j
-                    if "数量" in c and "数量" not in cmap:
-                        cmap["数量"] = j
-                    if ("lot" in c or "ロット" in c) and "lot" not in cmap:
-                        cmap["lot"] = j
-                    if "備考" in c and "備考" not in cmap:
-                        cmap["備考"] = j
-                hidx = i
-                break
-        if hidx is None or "品名" not in cmap or "数量" not in cmap:
-            continue
-        pcol, qcol = cmap["品名"], cmap["数量"]
-        lcol, bcol = cmap.get("lot"), cmap.get("備考")
-        for row in rows[hidx + 1:]:
-            name = row[pcol] if pcol < len(row) else None
-            nn = normalize(name)
-            if "合計" in nn or "受領" in nn:
-                break  # 仮納品書ブロックの終端（受領書は無視）
-            if not nn or is_shizai(name):
+                headers.append((i, _colmap_kari(nc)))
+        for hi, cmap in headers:
+            if "品名" not in cmap or "数量" not in cmap:
                 continue
-            qty = first_num(row[qcol]) if qcol < len(row) else None
-            if qty is None:
+            # ブロック種別: ヘッダー上方8行に「受領」があれば受領書→無視
+            is_juryo = False
+            for k in range(hi, max(-1, hi - 8), -1):
+                joined = "".join(normalize(c) for c in rows[k])
+                if "受領" in joined:
+                    is_juryo = True
+                    break
+                if "納品書" in joined:
+                    break
+            if is_juryo:
                 continue
-            lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
-            bikou = row[bcol] if (bcol is not None and bcol < len(row)) else None
-            items.append({
-                "製品名": str(name).strip(),
-                "数量": qty,
-                "Lot": str(lot).strip() if lot else "",
-                "備考": str(bikou).strip() if bikou else "",
-                "シート": ws.title,
-            })
-    return items
+            pcol, qcol = cmap["品名"], cmap["数量"]
+            lcol, bcol = cmap.get("lot"), cmap.get("備考")
+            for row in rows[hi + 1:]:
+                name = row[pcol] if pcol < len(row) else None
+                nn = normalize(name)
+                if "合計" in nn or "受領" in nn or "品名" in nn:
+                    break  # 合計 / 受領書 / 次ブロックのヘッダーで終端
+                if not nn:
+                    continue
+                qty = first_num(row[qcol]) if qcol < len(row) else None
+                lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
+                bikou = row[bcol] if (bcol is not None and bcol < len(row)) else None
+                rec = {
+                    "製品名": str(name).strip(),
+                    "数量": int(qty) if qty is not None else "",
+                    "Lot": str(lot).strip() if lot else "",
+                    "備考": str(bikou).strip() if bikou else "",
+                    "シート": ws.title,
+                }
+                if is_shizai(name):
+                    excluded.append({**rec, "除外理由": "資材/残資材"})
+                    continue
+                if qty is None:
+                    excluded.append({**rec, "除外理由": "数量が空/非数値"})
+                    continue
+                rec["数量"] = qty
+                items.append(rec)
+    return items, excluded
 
 # ================= 集計・突合 =================
+def parse_case_terms(text):
+    """備考のケース構成文字列を (入数, 箱数) のリストへ。例 '300×3c/s、100×1c/s' -> [(300,3),(100,1)]"""
+    if not text:
+        return []
+    t = unicodedata.normalize("NFKC", str(text))
+    pairs = []
+    for m in re.finditer(r"(\d[\d,]*)\s*[x×*]\s*(\d[\d,]*)", t):
+        try:
+            pairs.append((float(m.group(1).replace(",", "")), float(m.group(2).replace(",", ""))))
+        except ValueError:
+            pass
+    return pairs
+
 def aggregate(items):
+    """製品×ロットで数量を合算。ケースは入数ごとに箱数を合算（例 50×10 + 50×1×3 -> 50×13）。"""
     agg = {}
     for it in items:
         key = (normalize(it["製品名"]), it["Lot"])
         if key not in agg:
-            agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0, "備考": set()}
+            agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0, "cases": defaultdict(float)}
         agg[key]["数量"] += it["数量"]
-        if it["備考"]:
-            agg[key]["備考"].add(it["備考"])
+        for nyusu, hako in parse_case_terms(it["備考"]):
+            agg[key]["cases"][nyusu] += hako
     return list(agg.values())
 
+BASE_LEFT = ["製品名", "ロット", "出荷数"]
+BASE_RIGHT = ["商品CD", "処方番号", "単価", "金額", "要確認", "メモ"]
+_CIRC = "①②③④⑤⑥⑦⑧⑨⑩"
+
+def _case_terms(a):
+    """入数の降順で '入数×箱数' のリスト。"""
+    return ["%d×%d" % (int(n), int(h)) for n, h in sorted(a["cases"].items(), key=lambda kv: -kv[0]) if h]
+
 def build_rows(agg, master_index):
-    out = []
+    """rows と列順(colorder)を返す。ケースは掛け算ごとに ケース①/ケース②… の列に展開。"""
+    prepared, maxk = [], 0
     for a in sorted(agg, key=lambda x: normalize(x["製品名"])):
         entries = master_index.get(normalize(a["製品名"]), [])
         chosen, flags = (None, ["単価リストに該当なし"]) if not entries else select_price(entries, a["数量"])
         tanka = chosen["単価"] if chosen else None
-        out.append({
-            "製品名": a["製品名"],
-            "ロット": a["Lot"],
-            "出荷数": int(a["数量"]),
-            "ケース構成": " / ".join(sorted(a["備考"])),
+        terms = _case_terms(a)
+        maxk = max(maxk, len(terms))
+        prepared.append((a, chosen, flags, tanka, terms))
+    case_cols = ["ケース%s" % _CIRC[i] for i in range(maxk)]
+    colorder = BASE_LEFT + case_cols + BASE_RIGHT
+    rows = []
+    for a, chosen, flags, tanka, terms in prepared:
+        row = {
+            "製品名": a["製品名"], "ロット": a["Lot"], "出荷数": int(a["数量"]),
             "商品CD": chosen["商品CD"] if chosen else "",
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
             "金額": int(tanka * a["数量"]) if tanka else None,
             "要確認": "要確認" if flags else "",
             "メモ": " / ".join(flags),
-        })
-    return out
+        }
+        for i, col in enumerate(case_cols):
+            row[col] = terms[i] if i < len(terms) else ""
+        rows.append(row)
+    return rows, colorder
 
 # ================= 出力(xlsx) =================
-HDR = ["製品名", "ロット", "出荷数", "ケース構成", "商品CD", "処方番号", "単価", "金額", "要確認", "メモ"]
+_WIDTHS = {"製品名": 34, "ロット": 10, "出荷数": 9, "商品CD": 11,
+           "処方番号": 16, "単価": 9, "金額": 12, "要確認": 8, "メモ": 42}
+_NUMCOLS = {"単価", "金額", "出荷数"}
 
-def to_workbook(rows, date_label=""):
+def to_workbook(rows, colorder, date_label=""):
     wb = Workbook()
     ws = wb.active
     ws.title = "出荷連絡表(単価入り)"
@@ -258,28 +314,31 @@ def to_workbook(rows, date_label=""):
     warn = PatternFill("solid", fgColor="FFEBEE")
     thin = Side(style="thin", color="E7C9D6")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
-    ws.merge_cells("A1:J1")
+    last = ws.cell(row=1, column=len(colorder)).column_letter
+    ws.merge_cells("A1:%s1" % last)
     ws["A1"] = "出荷連絡表（単価入り）　%s" % date_label
     ws["A1"].fill = brand
     ws["A1"].font = Font(name="Yu Gothic", color="FFFFFF", bold=True, size=14)
     ws["A1"].alignment = Alignment(vertical="center", indent=1)
     ws.row_dimensions[1].height = 30
-    for j, h in enumerate(HDR, 1):
+    for j, h in enumerate(colorder, 1):
         c = ws.cell(row=2, column=j, value=h)
         c.fill = hdrfill; c.font = Font(name="Yu Gothic", color="FFFFFF", bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center"); c.border = border
     for i, r in enumerate(rows, 3):
-        for j, k in enumerate(HDR, 1):
-            c = ws.cell(row=i, column=j, value=r[k])
+        for j, k in enumerate(colorder, 1):
+            c = ws.cell(row=i, column=j, value=r.get(k, ""))
             c.font = Font(name="Yu Gothic", size=10.5); c.border = border
-            if k in ("単価", "金額", "出荷数"):
-                c.number_format = "#,##0"; c.alignment = Alignment(horizontal="right")
-        if r["要確認"]:
-            for j in range(1, len(HDR) + 1):
+            if k in _NUMCOLS:
+                c.number_format = "#,##0"
+                c.alignment = Alignment(horizontal="right", vertical="top")
+            else:
+                c.alignment = Alignment(wrap_text=True, vertical="top")
+        if r.get("要確認"):
+            for j in range(1, len(colorder) + 1):
                 ws.cell(row=i, column=j).fill = warn
-    widths = [34, 10, 9, 18, 10, 14, 9, 12, 8, 40]
-    for j, w in enumerate(widths, 1):
-        ws.column_dimensions[ws.cell(row=2, column=j).column_letter].width = w
+    for j, k in enumerate(colorder, 1):
+        ws.column_dimensions[ws.cell(row=2, column=j).column_letter].width = _WIDTHS.get(k, 12)
     ws.freeze_panes = "A3"
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return bio
@@ -287,16 +346,17 @@ def to_workbook(rows, date_label=""):
 # ================= 一括処理 =================
 def generate(karinouhin_fileobj, master_fileobj, master_filename, date_label=""):
     master_index, n = load_master(master_fileobj, master_filename)
-    items = parse_karinouhin(karinouhin_fileobj)
+    items, excluded = parse_karinouhin(karinouhin_fileobj)
     agg = aggregate(items)
-    rows = build_rows(agg, master_index)
+    rows, colorder = build_rows(agg, master_index)
     stats = {
         "マスタ商品数": n,
         "仮納品書 明細数(資材除外後)": len(items),
         "出荷連絡表 行数": len(rows),
         "要確認 行数": sum(1 for r in rows if r["要確認"]),
     }
-    return rows, stats
+    debug = {"items": items, "excluded": excluded}
+    return rows, colorder, stats, debug
 
 if __name__ == "__main__":
     import sys, json
@@ -305,15 +365,18 @@ if __name__ == "__main__":
     with open(master, "rb") as mf:
         midx, n = load_master(mf, master)
     with open(kari, "rb") as kf:
-        items = parse_karinouhin(kf)
-    rows = build_rows(aggregate(items), midx)
-    print("マスタ商品数:", n, "/ 仮納品書明細:", len(items), "/ 出力行:", len(rows))
-    print("-" * 90)
+        items, excluded = parse_karinouhin(kf)
+    rows, colorder = build_rows(aggregate(items), midx)
+    print("マスタ商品数:", n, "/ 仮納品書明細:", len(items), "/ 除外:", len(excluded), "/ 出力行:", len(rows))
+    print("列:", " | ".join(colorder))
+    print("-" * 100)
+    casecols = [c for c in colorder if c.startswith("ケース")]
     for r in rows:
-        print("%-30s Lot:%-6s 数:%6d 単価:%s 金額:%s %s" % (
-            r["製品名"][:30], r["ロット"], r["出荷数"],
+        cases = " ".join(r.get(c, "") for c in casecols).strip()
+        print("%-28s Lot:%-6s 数:%6d [%s] 単価:%s 金額:%s %s" % (
+            r["製品名"][:28], r["ロット"], r["出荷数"], cases,
             str(r["単価"]), str(r["金額"]), ("[" + r["メモ"] + "]") if r["要確認"] else ""))
-    bio = to_workbook(rows)
+    bio = to_workbook(rows, colorder)
     with open(out, "wb") as f:
         f.write(bio.read())
     print("-" * 90); print("saved:", out)
