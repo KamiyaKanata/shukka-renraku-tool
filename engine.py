@@ -244,10 +244,7 @@ def parse_karinouhin(fileobj):
                 if is_shizai(name):
                     excluded.append({**rec, "除外理由": "資材/残資材"})
                     continue
-                if qty is None:
-                    excluded.append({**rec, "除外理由": "数量が空/非数値"})
-                    continue
-                rec["数量"] = qty
+                rec["数量"] = qty  # 数量が空でも除外しない（後段で「要確認」に回す）
                 items.append(rec)
     kari_date = Counter(date_votes).most_common(1)[0][0] if date_votes else None
     return items, excluded, kari_date
@@ -272,8 +269,13 @@ def aggregate(items):
     for it in items:
         key = (normalize(it["製品名"]), it["Lot"])
         if key not in agg:
-            agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0, "cases": defaultdict(float)}
-        agg[key]["数量"] += it["数量"]
+            agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0,
+                        "cases": defaultdict(float), "数量欠落": False}
+        q = it["数量"]
+        if q is None:
+            agg[key]["数量欠落"] = True   # 数量が空の明細あり → 後段で要確認
+        else:
+            agg[key]["数量"] += q
         for nyusu, hako in parse_case_terms(it["備考"]):
             agg[key]["cases"][nyusu] += hako
     return list(agg.values())
@@ -290,22 +292,30 @@ def build_rows(agg, master_index):
     """rows と列順(colorder)を返す。ケースは掛け算ごとに ケース①/ケース②… の列に展開。"""
     prepared, maxk = [], 0
     for a in sorted(agg, key=lambda x: normalize(x["製品名"])):
-        entries = master_index.get(normalize(a["製品名"]), [])
-        chosen, flags = (None, ["単価リストに該当なし"]) if not entries else select_price(entries, a["数量"])
-        tanka = chosen["単価"] if chosen else None
         terms = _case_terms(a)
         maxk = max(maxk, len(terms))
-        prepared.append((a, chosen, flags, tanka, terms))
+        missing_all = a.get("数量欠落") and a["数量"] == 0  # 数量が全く取れていない
+        if missing_all:
+            chosen, flags = None, ["数量が空（要確認）"]
+        else:
+            entries = master_index.get(normalize(a["製品名"]), [])
+            chosen, flags = (None, ["単価リストに該当なし"]) if not entries else select_price(entries, a["数量"])
+            flags = list(flags)
+            if a.get("数量欠落"):
+                flags.append("一部明細で数量が空（要確認）")
+        tanka = chosen["単価"] if chosen else None
+        prepared.append((a, chosen, flags, tanka, terms, missing_all))
     case_cols = ["ケース%s" % _CIRC[i] for i in range(maxk)]
     colorder = BASE_LEFT + case_cols + BASE_RIGHT
     rows = []
-    for a, chosen, flags, tanka, terms in prepared:
+    for a, chosen, flags, tanka, terms, missing_all in prepared:
         row = {
-            "製品名": a["製品名"], "ロット": a["Lot"], "出荷数": int(a["数量"]),
+            "製品名": a["製品名"], "ロット": a["Lot"],
+            "出荷数": ("" if missing_all else int(a["数量"])),
             "商品CD": chosen["商品CD"] if chosen else "",
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
-            "金額": int(tanka * a["数量"]) if tanka else None,
+            "金額": int(tanka * a["数量"]) if (tanka and not missing_all) else None,
             "要確認": "要確認" if flags else "",
             "メモ": " / ".join(flags),
         }
