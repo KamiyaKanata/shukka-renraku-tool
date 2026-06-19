@@ -40,8 +40,12 @@ def first_num(s):
 def parse_date(s):
     if s is None:
         return None
-    if isinstance(s, (datetime.date, datetime.datetime)):
-        return s if isinstance(s, datetime.date) else s.date()
+    if isinstance(s, datetime.datetime):   # datetime は date より先に判定（date のサブクラスのため）
+        return s.date()
+    if isinstance(s, datetime.date):
+        return s
+    if isinstance(s, (int, float)) and 20000 <= s <= 80000:  # Excelシリアル値（1954〜2119頃）
+        return (datetime.datetime(1899, 12, 30) + datetime.timedelta(days=int(s))).date()
     s = unicodedata.normalize("NFKC", str(s))
     m = re.search(r"(\d{4})[./\-](\d{1,2})[./\-](\d{1,2})", s)  # YYYY/M/D
     if m:
@@ -238,6 +242,7 @@ def parse_karinouhin(fileobj):
             continue
         pcol, qcol = cmap["品名"], cmap["数量"]
         lcol, bcol = cmap.get("lot"), cmap.get("備考")
+        zanzai = False  # 「○○ 残資材」ヘッダー以降はブロック全体が資材なので除外
         for ci in range(hidx + 1, len(cell_rows)):
             row = rows[ci]
             name = row[pcol] if pcol < len(row) else None
@@ -249,22 +254,33 @@ def parse_karinouhin(fileobj):
             # 黒/赤の二重記載：赤文字の行は控え（黒の写し）なので除外
             crow = cell_rows[ci]
             name_cell = crow[pcol] if pcol < len(crow) else None
+            qcell = row[qcol] if qcol < len(row) else ""
             if _is_red_font(name_cell):
-                excluded.append({"製品名": str(name).strip(),
-                                 "数量": row[qcol] if qcol < len(row) else "",
+                excluded.append({"製品名": str(name).strip(), "数量": qcell,
                                  "除外理由": "赤文字（二重記載の控え）", "シート": ws.title})
                 continue
-            qty = first_num(row[qcol]) if qcol < len(row) else None
+            raw = str(name)
+            # 「○○ 残資材」行＝資材ブロックの開始。以降このブロックの明細は全て資材として除外。
+            if "残資材" in raw:
+                zanzai = True
+                excluded.append({"製品名": raw.strip(), "数量": qcell,
+                                 "除外理由": "残資材ブロック(開始)", "シート": ws.title})
+                continue
+            if zanzai:
+                excluded.append({"製品名": raw.strip(), "数量": qcell,
+                                 "除外理由": "残資材ブロック", "シート": ws.title})
+                continue
+            qty = first_num(qcell)
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
             bikou = row[bcol] if (bcol is not None and bcol < len(row)) else None
             rec = {
-                "製品名": str(name).strip(),
-                "数量": int(qty) if qty is not None else "",
+                "製品名": raw.strip(),
+                "数量": qty if qty is not None else "",
                 "Lot": str(lot).strip() if lot else "",
                 "備考": str(bikou).strip() if bikou else "",
                 "シート": ws.title,
             }
-            if is_shizai(name):
+            if is_shizai(name):  # 個別名の資材（容器/ポンプ等）も念のため除外
                 excluded.append({**rec, "除外理由": "資材/残資材"})
                 continue
             rec["数量"] = qty  # 数量が空でも除外しない（後段で「要確認」に回す）
@@ -307,6 +323,11 @@ BASE_LEFT = ["製品名", "ロット", "出荷数"]
 BASE_RIGHT = ["商品CD", "処方番号", "単価", "金額", "要確認", "メモ"]
 _CIRC = "①②③④⑤⑥⑦⑧⑨⑩"
 
+def _num_out(q):
+    """整数ならint、小数あり（バルクのkg等）ならそのまま小数で返す。"""
+    q = float(q)
+    return int(q) if q.is_integer() else round(q, 3)
+
 def _case_terms(a):
     """入数の降順で '入数×箱数' のリスト。"""
     return ["%d×%d" % (int(n), int(h)) for n, h in sorted(a["cases"].items(), key=lambda kv: -kv[0]) if h]
@@ -334,11 +355,11 @@ def build_rows(agg, master_index):
     for a, chosen, flags, tanka, terms, missing_all in prepared:
         row = {
             "製品名": a["製品名"], "ロット": a["Lot"],
-            "出荷数": ("" if missing_all else int(a["数量"])),
+            "出荷数": ("" if missing_all else _num_out(a["数量"])),
             "商品CD": chosen["商品CD"] if chosen else "",
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
-            "金額": int(tanka * a["数量"]) if (tanka and not missing_all) else None,
+            "金額": int(round(tanka * a["数量"])) if (tanka and not missing_all) else None,
             "要確認": "要確認" if flags else "",
             "メモ": " / ".join(flags),
         }
@@ -379,7 +400,7 @@ def to_workbook(rows, colorder, date_label=""):
             c = ws.cell(row=i, column=j, value=r.get(k, ""))
             c.font = Font(name="Yu Gothic", size=10.5); c.border = border
             if k in _NUMCOLS:
-                c.number_format = "#,##0"
+                c.number_format = "#,##0.###" if k == "出荷数" else "#,##0"  # 出荷数は小数(kg)も表示
                 c.alignment = Alignment(horizontal="right", vertical="top")
             else:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
@@ -438,8 +459,8 @@ if __name__ == "__main__":
     casecols = [c for c in colorder if c.startswith("ケース")]
     for r in rows:
         cases = " ".join(r.get(c, "") for c in casecols).strip()
-        print("%-28s Lot:%-6s 数:%6d [%s] 単価:%s 金額:%s %s" % (
-            r["製品名"][:28], r["ロット"], r["出荷数"], cases,
+        print("%-28s Lot:%-6s 数:%8s [%s] 単価:%s 金額:%s %s" % (
+            r["製品名"][:28], r["ロット"], str(r["出荷数"]), cases,
             str(r["単価"]), str(r["金額"]), ("[" + r["メモ"] + "]") if r["要確認"] else ""))
     bio = to_workbook(rows, colorder)
     with open(out, "wb") as f:
