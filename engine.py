@@ -352,6 +352,21 @@ def _case_terms(a):
     """入数の降順で '入数×箱数' のリスト。"""
     return ["%d×%d" % (int(n), int(h)) for n, h in sorted(a["cases"].items(), key=lambda kv: -kv[0]) if h]
 
+def _norm_tokens(s):
+    """NFKC+小文字でトークン分割（空白境界を残す）。全角スペースは半角化される。"""
+    return unicodedata.normalize("NFKC", str(s)).lower().split()
+
+def _fuzzy_master_lookup(name, master_index):
+    """完全一致しない時、末尾の短いサフィックス(グレード記号 N/β 等)を外して再検索。
+    例: 『Radical Sponge Ｎ』→『Radical Sponge』にマスタ一致。(entries, note) を返す。"""
+    toks = _norm_tokens(name)
+    if len(toks) >= 2 and len(toks[-1]) <= 2:
+        loose = "".join(toks[:-1])  # 空白除去済み = normalize() 相当
+        e = master_index.get(loose)
+        if e:
+            return e, "末尾「%s」を無視してマスタ一致" % toks[-1].upper()
+    return [], ""
+
 def build_rows(agg, master_index):
     """rows と列順(colorder)を返す。ケースは掛け算ごとに ケース①/ケース②… の列に展開。"""
     prepared, maxk = [], 0
@@ -359,20 +374,26 @@ def build_rows(agg, master_index):
         terms = _case_terms(a)
         maxk = max(maxk, len(terms))
         missing_all = a.get("数量欠落") and a["数量"] == 0  # 数量が全く取れていない
+        note = ""  # 要確認にはしない補足（あいまい一致・単位など）
         if missing_all:
             chosen, flags = None, ["数量が空（要確認）"]
         else:
             entries = master_index.get(normalize(a["製品名"]), [])
+            if not entries:  # 完全一致なし → 末尾サフィックスを外して再検索
+                entries, note = _fuzzy_master_lookup(a["製品名"], master_index)
             chosen, flags = (None, ["単価リストに該当なし"]) if not entries else select_price(entries, a["数量"])
             flags = list(flags)
             if a.get("数量欠落"):
                 flags.append("一部明細で数量が空（要確認）")
+            if chosen and "原料" in (chosen.get("シート") or ""):  # 原料は単価が/kg
+                note = (note + " / " if note else "") + "原料(単価は/kg)"
         tanka = chosen["単価"] if chosen else None
-        prepared.append((a, chosen, flags, tanka, terms, missing_all))
+        prepared.append((a, chosen, flags, tanka, terms, missing_all, note))
     case_cols = ["ケース%s" % _CIRC[i] for i in range(maxk)]
     colorder = BASE_LEFT + case_cols + BASE_RIGHT
     rows = []
-    for a, chosen, flags, tanka, terms, missing_all in prepared:
+    for a, chosen, flags, tanka, terms, missing_all, note in prepared:
+        memo = " / ".join([x for x in flags + ([note] if note else []) if x])
         row = {
             "製品名": a["製品名"], "ロット": a["Lot"],
             "出荷数": ("" if missing_all else _num_out(a["数量"])),
@@ -380,8 +401,8 @@ def build_rows(agg, master_index):
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
             "金額": int(round(tanka * a["数量"])) if (tanka and not missing_all) else None,
-            "要確認": "要確認" if flags else "",
-            "メモ": " / ".join(flags),
+            "要確認": "要確認" if flags else "",  # noteは要確認にしない
+            "メモ": memo,
         }
         for i, col in enumerate(case_cols):
             row[col] = terms[i] if i < len(terms) else ""
