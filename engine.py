@@ -375,6 +375,7 @@ def build_rows(agg, master_index):
         maxk = max(maxk, len(terms))
         missing_all = a.get("数量欠落") and a["数量"] == 0  # 数量が全く取れていない
         note = ""  # 要確認にはしない補足（あいまい一致・単位など）
+        genryo = False  # 原料(単価/kg・数量はg)→金額計算で1000分の1する
         if missing_all:
             chosen, flags = None, ["数量が空（要確認）"]
         else:
@@ -385,22 +386,26 @@ def build_rows(agg, master_index):
             flags = list(flags)
             if a.get("数量欠落"):
                 flags.append("一部明細で数量が空（要確認）")
-            if chosen and "原料" in (chosen.get("シート") or ""):  # 原料は単価が/kg
-                note = (note + " / " if note else "") + "原料(単価は/kg)"
+            if chosen and "原料" in (chosen.get("シート") or ""):  # 原料: 数量はg・単価は/kg
+                genryo = True
+                note = (note + " / " if note else "") + "原料(数量g×単価/kg)"
         tanka = chosen["単価"] if chosen else None
-        prepared.append((a, chosen, flags, tanka, terms, missing_all, note))
+        prepared.append((a, chosen, flags, tanka, terms, missing_all, note, genryo))
     case_cols = ["ケース%s" % _CIRC[i] for i in range(maxk)]
     colorder = BASE_LEFT + case_cols + BASE_RIGHT
     rows = []
-    for a, chosen, flags, tanka, terms, missing_all, note in prepared:
+    for a, chosen, flags, tanka, terms, missing_all, note, genryo in prepared:
         memo = " / ".join([x for x in flags + ([note] if note else []) if x])
+        kingaku = None
+        if tanka and not missing_all:
+            kingaku = int(round(tanka * a["数量"] / (1000.0 if genryo else 1.0)))  # 原料はg→kg換算
         row = {
             "製品名": a["製品名"], "ロット": a["Lot"],
             "出荷数": ("" if missing_all else _num_out(a["数量"])),
             "商品CD": chosen["商品CD"] if chosen else "",
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
-            "金額": int(round(tanka * a["数量"])) if (tanka and not missing_all) else None,
+            "金額": kingaku,
             "要確認": "要確認" if flags else "",  # noteは要確認にしない
             "メモ": memo,
         }

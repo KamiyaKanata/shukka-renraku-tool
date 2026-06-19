@@ -55,7 +55,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v2.4（末尾サフィックス無視の一致／原料は/kg明記）"
+APP_VERSION = "v2.5（原料は数量g×単価/kgで金額計算）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
