@@ -55,8 +55,9 @@ def require_password():
 if not require_password():
     st.stop()
 
+APP_VERSION = "v2.1（日付シート分割・履歴対応）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
-st.caption("仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。")
+st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
 with st.sidebar:
     st.header("使い方")
