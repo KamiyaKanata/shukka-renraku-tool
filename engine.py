@@ -224,13 +224,18 @@ def parse_karinouhin(fileobj):
     for ws in wb.worksheets:
         cell_rows = list(ws.iter_rows())
         rows = [[c.value for c in r] for r in cell_rows]
-        # 「日付」を含む行から出荷日を採取（メモ等の日付を拾わないようヘッダー付近に限定）
+        # シートごとの出荷日（メモ等の日付を拾わないようヘッダー付近に限定）
+        sheet_votes = []
         for row in rows[:14]:
             if any("日付" in normalize(c) for c in row):
                 for c in row:
                     d = parse_date(c)
                     if d:
-                        date_votes.append(d)
+                        sheet_votes.append(d)
+        sheet_date = Counter(sheet_votes).most_common(1)[0][0] if sheet_votes else None
+        if sheet_date:
+            date_votes.append(sheet_date)
+        sd_str = sheet_date.isoformat() if sheet_date else ""
         # 最初の「品名&数量」ヘッダー = 仮納品書の明細ブロック。
         hidx, cmap = None, None
         for i, row in enumerate(rows):
@@ -257,18 +262,18 @@ def parse_karinouhin(fileobj):
             qcell = row[qcol] if qcol < len(row) else ""
             if _is_red_font(name_cell):
                 excluded.append({"製品名": str(name).strip(), "数量": qcell,
-                                 "除外理由": "赤文字（二重記載の控え）", "シート": ws.title})
+                                 "除外理由": "赤文字（二重記載の控え）", "シート": ws.title, "日付": sd_str})
                 continue
             raw = str(name)
             # 「○○ 残資材」行＝資材ブロックの開始。以降このブロックの明細は全て資材として除外。
             if "残資材" in raw:
                 zanzai = True
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材ブロック(開始)", "シート": ws.title})
+                                 "除外理由": "残資材ブロック(開始)", "シート": ws.title, "日付": sd_str})
                 continue
             if zanzai:
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材ブロック", "シート": ws.title})
+                                 "除外理由": "残資材ブロック", "シート": ws.title, "日付": sd_str})
                 continue
             qty = first_num(qcell)
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
@@ -279,9 +284,10 @@ def parse_karinouhin(fileobj):
                 "Lot": str(lot).strip() if lot else "",
                 "備考": str(bikou).strip() if bikou else "",
                 "シート": ws.title,
+                "日付": sheet_date,           # 集計のグルーピングキー（date or None）
             }
             if is_shizai(name):  # 個別名の資材（容器/ポンプ等）も念のため除外
-                excluded.append({**rec, "除外理由": "資材/残資材"})
+                excluded.append({**rec, "日付": sd_str, "除外理由": "資材/残資材"})
                 continue
             rec["数量"] = qty  # 数量が空でも除外しない（後段で「要確認」に回す）
             items.append(rec)
@@ -379,12 +385,21 @@ def display_header(col):
         return "ケース" if col == "ケース①" else ""
     return col
 
-def to_workbook(rows, colorder, date_label=""):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "出荷連絡表(単価入り)"
-    thin = Side(style="thin", color="BFBFBF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+_INVALID_SHEET = re.compile(r"[\[\]\:\*\?\/\\]")
+
+def _safe_sheet_title(label, used):
+    """Excelシート名に使える形へ（禁則文字除去・31文字制限・重複回避）。"""
+    t = _INVALID_SHEET.sub("-", str(label or "出荷連絡表")).strip() or "出荷連絡表"
+    t = t[:31]
+    base, i = t, 2
+    while t in used:
+        suf = "(%d)" % i
+        t = base[:31 - len(suf)] + suf
+        i += 1
+    used.add(t)
+    return t
+
+def _write_sheet(ws, rows, colorder, date_label, border):
     last = ws.cell(row=1, column=len(colorder)).column_letter
     ws.merge_cells("A1:%s1" % last)
     ws["A1"] = "出荷連絡表　%s" % date_label
@@ -407,62 +422,105 @@ def to_workbook(rows, colorder, date_label=""):
     for j, k in enumerate(colorder, 1):
         ws.column_dimensions[ws.cell(row=2, column=j).column_letter].width = _WIDTHS.get(k, 12)
     ws.freeze_panes = "A3"
+
+def to_workbook(groups, colorder=None, date_label=""):
+    """groups（generateの返り値）を、日付ごとのシートを持つ1ブックにする。
+    後方互換: to_workbook(rows, colorder, date_label) の旧呼び出しも受け付ける。"""
+    if groups and isinstance(groups, list) and groups and isinstance(groups[0], dict) and "rows" in groups[0]:
+        gs = groups
+    else:  # 旧シグネチャ（rows, colorder, date_label）
+        gs = [{"日付": date_label, "rows": groups, "colorder": colorder}]
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    wb = Workbook(); wb.remove(wb.active)
+    used = set()
+    for g in gs:
+        if not g.get("colorder"):
+            continue
+        ws = wb.create_sheet(_safe_sheet_title(g["日付"], used))
+        _write_sheet(ws, g["rows"], g["colorder"], g["日付"], border)
+    if not wb.worksheets:
+        wb.create_sheet("出荷連絡表")
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return bio
 
 # ================= 一括処理 =================
 def generate(karinouhin_fileobjs, master_fileobj, master_filename, date_label=""):
-    """複数の仮納品書を受け取り（単一でも可）、まとめて1枚の出荷連絡表に集計する。"""
+    """複数の仮納品書（各々が複数シートでも可）を受け取り、出荷日ごとにグルーピングして
+    「1日付＝1シート」の出荷連絡表グループ群を返す。
+    返り値: (groups, stats, debug)
+      groups = [ {"日付": "2026-06-19", "rows": [...], "colorder": [...], "明細数": n, "要確認": n}, ... ]
+    """
     if not isinstance(karinouhin_fileobjs, (list, tuple)):
         karinouhin_fileobjs = [karinouhin_fileobjs]
     master_index, n = load_master(master_fileobj, master_filename)
-    items, excluded, dates, per_file = [], [], [], []
+    items, excluded, per_file = [], [], []
     for f in karinouhin_fileobjs:
         it, ex, kd = parse_karinouhin(f)
         items += it
         excluded += ex
-        if kd:
-            dates.append(kd)
         per_file.append({"ファイル": getattr(f, "name", "(不明)"),
                          "明細(資材除外後)": len(it), "除外": len(ex),
                          "日付": kd.isoformat() if kd else "(取得できず)"})
-    agg = aggregate(items)  # 製品×ロットでファイル横断に合算
-    rows, colorder = build_rows(agg, master_index)
-    kari_date = Counter(dates).most_common(1)[0][0] if dates else None
-    # 出荷日: ユーザー入力 > 仮納品書から自動取得 > 本日（必ず日付を付ける）
-    eff_date = (date_label or "").strip() or (kari_date.isoformat() if kari_date else datetime.date.today().isoformat())
+    # 出荷日でグルーピング（手入力があれば全件をそのラベル1シートへ）
+    all_dates = [it["日付"] for it in items if it.get("日付")]
+    overall = Counter(all_dates).most_common(1)[0][0] if all_dates else None
+    override = (date_label or "").strip()
+    today = datetime.date.today().isoformat()
+    groups_map = defaultdict(list)
+    if override:
+        groups_map[override] = list(items)
+    else:
+        for it in items:
+            d = it.get("日付") or overall          # 日付が取れないシートは代表日へ
+            groups_map[d.isoformat() if d else today].append(it)
+    groups = []
+    for label in sorted(groups_map.keys()):
+        rows, colorder = build_rows(aggregate(groups_map[label]), master_index)
+        groups.append({"日付": label, "rows": rows, "colorder": colorder,
+                       "明細数": len(groups_map[label]),
+                       "要確認": sum(1 for r in rows if r["要確認"])})
+    if not groups:  # 明細ゼロでも空の1シートは作る
+        rows, colorder = build_rows([], master_index)
+        groups.append({"日付": override or (overall.isoformat() if overall else today),
+                       "rows": rows, "colorder": colorder, "明細数": 0, "要確認": 0})
     stats = {
         "マスタ商品数": n,
         "仮納品書 明細数(資材除外後)": len(items),
-        "出荷連絡表 行数": len(rows),
-        "要確認 行数": sum(1 for r in rows if r["要確認"]),
-        "出荷日": eff_date,
-        "日付自動取得": bool(kari_date),
+        "出荷連絡表 行数": sum(len(g["rows"]) for g in groups),
+        "要確認 行数": sum(g["要確認"] for g in groups),
+        "シート数": len(groups),
+        "日付一覧": [g["日付"] for g in groups],
+        "日付自動取得": bool(all_dates) and not override,
         "ファイル数": len(karinouhin_fileobjs),
-        "日付一覧": sorted({d.isoformat() for d in dates}),
     }
     debug = {"items": items, "excluded": excluded, "per_file": per_file}
-    return rows, colorder, stats, debug
+    return groups, stats, debug
 
 if __name__ == "__main__":
-    import sys, json
-    kari, master = sys.argv[1], sys.argv[2]
-    out = sys.argv[3] if len(sys.argv) > 3 else "出力_出荷連絡表.xlsx"
+    import sys
+    # 使い方: python engine.py <仮納品書...> <master> [out(出荷連絡表*.xlsx)]
+    args = sys.argv[1:]
+    out = "出力_出荷連絡表.xlsx"
+    if args and args[-1].lower().endswith(".xlsx") and "出荷連絡表" in args[-1]:
+        out = args.pop()
+    master = args.pop()
+    karis = args
+    kfs = [open(k, "rb") for k in karis]
     with open(master, "rb") as mf:
-        midx, n = load_master(mf, master)
-    with open(kari, "rb") as kf:
-        items, excluded, _ = parse_karinouhin(kf)
-    rows, colorder = build_rows(aggregate(items), midx)
-    print("マスタ商品数:", n, "/ 仮納品書明細:", len(items), "/ 除外:", len(excluded), "/ 出力行:", len(rows))
-    print("列:", " | ".join(colorder))
-    print("-" * 100)
-    casecols = [c for c in colorder if c.startswith("ケース")]
-    for r in rows:
-        cases = " ".join(r.get(c, "") for c in casecols).strip()
-        print("%-28s Lot:%-6s 数:%8s [%s] 単価:%s 金額:%s %s" % (
-            r["製品名"][:28], r["ロット"], str(r["出荷数"]), cases,
-            str(r["単価"]), str(r["金額"]), ("[" + r["メモ"] + "]") if r["要確認"] else ""))
-    bio = to_workbook(rows, colorder)
+        groups, stats, debug = generate(kfs, mf, master)
+    for f in kfs:
+        f.close()
+    print("マスタ商品数:", stats["マスタ商品数"], "/ 明細:", stats["仮納品書 明細数(資材除外後)"],
+          "/ 除外:", len(debug["excluded"]), "/ シート数:", stats["シート数"], "/ 日付:", stats["日付一覧"])
+    for g in groups:
+        print("=" * 90, "\n■ 出荷日:", g["日付"], "（", len(g["rows"]), "行 ）")
+        casecols = [c for c in g["colorder"] if c.startswith("ケース")]
+        for r in g["rows"]:
+            cases = " ".join(r.get(c, "") for c in casecols).strip()
+            print("%-26s Lot:%-6s 数:%8s [%s] 単価:%s 金額:%s %s" % (
+                r["製品名"][:26], r["ロット"], str(r["出荷数"]), cases,
+                str(r["単価"]), str(r["金額"]), ("[" + r["メモ"] + "]") if r["要確認"] else ""))
     with open(out, "wb") as f:
-        f.write(bio.read())
+        f.write(to_workbook(groups).read())
     print("-" * 90); print("saved:", out)

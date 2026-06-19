@@ -3,11 +3,34 @@
 仮納品書 + 商品マスタ をアップロード → ボタン → 単価入り出荷連絡表をダウンロード。
 起動: ./.venv/bin/streamlit run app.py
 """
+import datetime
 import streamlit as st
 import pandas as pd
 import engine
 
 st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", layout="wide")
+_XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+
+
+def _preview_df(rows, colorder):
+    """ケース列の見出しを「ケース＋空欄」に整え、色なしの表として返す。"""
+    df = pd.DataFrame(rows)[colorder]
+    labels, blank_n = [], 0
+    for c in colorder:
+        if c.startswith("ケース") and c != "ケース①":
+            blank_n += 1
+            labels.append(" " * blank_n)  # 列名の一意性は半角スペース数で確保
+        else:
+            labels.append(engine.display_header(c))
+    df.columns = labels
+    return df
+
+
+def _push_history(filename, data, summary):
+    """このセッションの直近3件を保持（新しい順）。サーバーには保存しない。"""
+    hist = st.session_state.setdefault("history", [])
+    hist.insert(0, {"filename": filename, "data": data, "summary": summary})
+    del hist[3:]
 
 
 def require_password():
@@ -42,11 +65,13 @@ with st.sidebar:
         "2. **商品マスタ**（商品単価リスト .xlsm / .xlsx / .csv）をアップロード\n"
         "3. **生成**ボタンを押す\n"
         "4. 表を確認して **ダウンロード**\n\n"
-        "・複数ファイルは製品×ロットで合算して1枚にまとめます\n"
+        "・複数ファイル／複数シートは **出荷日ごとに別シート**で1つのExcelにまとめます\n"
+        "・同一日付の中は製品×ロットで合算します\n"
         "・資材／残資材は自動で除外、有償サンプルは含めます\n"
         "・**赤文字（黒との二重記載の控え）は自動で除外**し二重計上しません\n"
         "・単価は品名＋数量（ロット閾値）で自動ひも付け\n"
-        "・引けない／曖昧な行は **🔶要確認** として表示"
+        "・引けない／曖昧な行は **🔶要確認** として表示\n"
+        "・直近3件は画面下の **履歴** から再ダウンロード可（このセッション内のみ）"
     )
     date_label = st.text_input("出荷日（空欄なら仮納品書から自動取得）", value="",
                                help="例: 2026-06-08。空欄のままなら仮納品書の日付を自動で使います。")
@@ -63,50 +88,42 @@ go = st.button("🚀 出荷連絡表を生成", type="primary", disabled=not (ka
 if go and kari and master:
     try:
         with st.spinner("解析中…（マスタが大きい場合は数十秒かかります）"):
-            rows, colorder, stats, debug = engine.generate(kari, master, master.name, date_label)
+            groups, stats, debug = engine.generate(kari, master, master.name, date_label)
     except Exception as e:
         st.error(f"処理でエラーが発生しました: {e}")
         st.stop()
 
+    dates = stats["日付一覧"]
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("出荷連絡表 行数", stats["出荷連絡表 行数"])
     m2.metric("要確認 行数", stats["要確認 行数"])
-    m3.metric("仮納品書 明細(資材除外後)", stats["仮納品書 明細数(資材除外後)"])
+    m3.metric("出荷日(シート)数", stats["シート数"])
     m4.metric("仮納品書ファイル数", stats["ファイル数"])
 
     _src = "仮納品書から自動取得" if stats.get("日付自動取得") else ("手入力" if date_label.strip() else "本日")
-    st.caption(f"📅 出荷日: **{stats['出荷日']}**（{_src}）／ マスタ商品数 {stats['マスタ商品数']}")
-    if len(stats.get("日付一覧", [])) > 1:
-        st.warning(f"⚠️ アップロードした仮納品書に複数の日付が混在しています（{', '.join(stats['日付一覧'])}）。"
-                   f"これらを1枚にまとめて集計しました。日付を分けたい場合はファイルごとに生成してください。")
+    st.caption(f"📅 出荷日: **{' / '.join(dates)}**（{_src}）／ マスタ商品数 {stats['マスタ商品数']}")
+    if len(dates) > 1:
+        st.info(f"🗂 複数の出荷日（{', '.join(dates)}）を検出 → **日付ごとに別シート**で1つのExcelにまとめました。")
 
     if stats["要確認 行数"]:
-        st.warning(f"🔶 {stats['要確認 行数']} 行が「要確認」です（単価未取得・数量帯外・名前衝突など）。下表の色付き行をご確認ください。")
+        st.warning(f"🔶 {stats['要確認 行数']} 行が「要確認」です（単価未取得・数量帯外・名前衝突など）。下表の該当行をご確認ください。")
     else:
         st.success("✅ すべての行で単価をひも付けできました。")
 
-    st.markdown("#### 出荷連絡表（プレビュー・全文表示）")
-    df = pd.DataFrame(rows)[colorder]
-    # ケース列の表示名は先頭だけ「ケース」、2列目以降は空欄（列名の一意性は半角スペース数で確保）
-    labels, blank_n = [], 0
-    for c in colorder:
-        if c.startswith("ケース") and c != "ケース①":
-            blank_n += 1
-            labels.append(" " * blank_n)
-        else:
-            labels.append(engine.display_header(c))
-    df.columns = labels
-    # st.table は折り返して全行・全文を表示（途中で切れない）。色は付けない。
-    st.table(df.style.hide(axis="index"))
+    # ダウンロード（日付ごとのシートを持つ1ブック）
+    bio = engine.to_workbook(groups)
+    fname = f"出荷連絡表_{dates[0]}.xlsx" if len(dates) == 1 else f"出荷連絡表_{dates[0]}〜{dates[-1]}.xlsx"
+    st.download_button("⬇️ 出荷連絡表をダウンロード", data=bio.getvalue(), file_name=fname,
+                       mime=_XLSX_MIME, type="primary")
+    summary = f"{len(dates)}シート / {stats['出荷連絡表 行数']}行 / 要確認{stats['要確認 行数']}"
+    _push_history(fname, bio.getvalue(), summary)
 
-    bio = engine.to_workbook(rows, colorder, stats["出荷日"])
-    st.download_button(
-        "⬇️ 出荷連絡表をダウンロード",
-        data=bio.getvalue(),
-        file_name=f"出荷連絡表_{stats['出荷日']}.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        type="primary",
-    )
+    # プレビュー（日付ごと）
+    st.markdown("#### 出荷連絡表（プレビュー・全文表示）")
+    for g in groups:
+        if len(groups) > 1:
+            st.markdown(f"**🗓 {g['日付']}**（{len(g['rows'])}行）")
+        st.table(_preview_df(g["rows"], g["colorder"]).style.hide(axis="index"))
 
     with st.expander(f"🔍 解析の内訳（読めた明細 {len(debug['items'])} 件 / 除外 {len(debug['excluded'])} 件）— 「商品が乗らない」原因の確認用"):
         if debug.get("per_file"):
@@ -118,3 +135,15 @@ if go and kari and master:
         st.table(pd.DataFrame(debug["excluded"]) if debug["excluded"] else pd.DataFrame({"(なし)": []}))
 else:
     st.info("①②の両方をアップロードすると「生成」できます。")
+
+# ===== 履歴（このセッションの直近3件・サーバー保存なし）=====
+_hist = st.session_state.get("history", [])
+if _hist:
+    st.divider()
+    st.markdown("### 🕘 履歴（このセッションの直近3件）")
+    st.caption("※サーバーには保存されません。ブラウザを閉じる／アプリ再起動で消えます。")
+    for i, h in enumerate(_hist):
+        col1, col2 = st.columns([3, 1])
+        col1.write(f"**{h['filename']}** — {h['summary']}")
+        col2.download_button("⬇️ DL", data=h["data"], file_name=h["filename"],
+                             mime=_XLSX_MIME, key=f"hist_{i}")
