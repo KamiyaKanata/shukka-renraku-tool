@@ -106,16 +106,20 @@ def _sheets_from(fileobj, filename):
         out.append((ws.title, list(ws.iter_rows(values_only=True))))
     return out
 
+def _is_name_col(c):
+    # 製品名/販売名に加え、原料タブの見出し「原料名」も名前列として認識する
+    return ("製品名" in c) or ("販売名" in c) or ("原料名" in c) or ("品名" in c)
+
 def _find_master_header(rows):
-    """製品名・単価列を含むヘッダー行を探し、列マップを返す。"""
+    """製品名(または原料名)・単価列を含むヘッダー行を探し、列マップを返す。"""
     for i, row in enumerate(rows[:30]):
         nc = [normalize(c) for c in row]
-        has_name = any(("製品名" in c) or ("販売名" in c) for c in nc)
+        has_name = any(_is_name_col(c) for c in nc)
         has_price = any("単価" in c for c in nc)
         if has_name and has_price:
             colmap = {}
             for j, c in enumerate(nc):
-                if (("製品名" in c) or ("販売名" in c)) and "製品名" not in colmap:
+                if _is_name_col(c) and "製品名" not in colmap:
                     colmap["製品名"] = j
                 if (("商品cd" in c) or ("商品コード" in c)) and "商品CD" not in colmap:
                     colmap["商品CD"] = j
@@ -274,15 +278,16 @@ def parse_karinouhin(fileobj):
                                  "除外理由": "赤文字（二重記載の控え）", "シート": ws.title, "日付": sd_str})
                 continue
             raw = str(name)
-            # 「○○ 残資材」「ご支給原料」行＝資材/支給ブロックの開始。以降の明細は全て除外。
-            if "残資材" in raw or "支給" in raw:
+            # 「○○ 残資材」行＝資材ブロックの開始。以降このブロックの明細は全て資材として除外。
+            # ※「ご支給原料」等の原料はブロック除外しない（原料は出荷連絡表に記載する）。
+            if "残資材" in raw:
                 zanzai = True
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材/支給ブロック(開始)", "シート": ws.title, "日付": sd_str})
+                                 "除外理由": "残資材ブロック(開始)", "シート": ws.title, "日付": sd_str})
                 continue
             if zanzai:
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材/支給ブロック", "シート": ws.title, "日付": sd_str})
+                                 "除外理由": "残資材ブロック", "シート": ws.title, "日付": sd_str})
                 continue
             qty = first_num(qcell)
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
