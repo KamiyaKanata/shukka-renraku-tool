@@ -188,13 +188,38 @@ def _colmap_kari(nc):
             cmap["備考"] = j
     return cmap
 
+def _is_red_font(cell):
+    """赤文字セルか判定。黒=正本／赤=二重記載の控え とみなし、赤を除外するため。"""
+    if cell is None:
+        return False
+    try:
+        color = cell.font.color
+    except Exception:
+        return False
+    if color is None:
+        return False
+    rgb = getattr(color, "rgb", None)
+    if isinstance(rgb, str) and len(rgb) >= 6:
+        h = rgb[-6:].upper()
+        try:
+            r, g, b = int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16)
+        except ValueError:
+            return False
+        return r >= 0x90 and g <= 0x70 and b <= 0x70  # 朱・赤・濃赤を赤系とみなす
+    if getattr(color, "indexed", None) in (2, 10):  # 標準パレットの赤
+        return True
+    return False
+
 def parse_karinouhin(fileobj):
-    """仮納品書を解析。1シートに複数の納品先ブロックがあっても全て拾い、
-    受領書ブロックは無視する。(items, excluded) を返す。"""
-    wb = load_workbook(fileobj, data_only=True, read_only=True)
+    """仮納品書を解析。最初の「品名&数量」ブロックのみを読み、最初の「合計」で停止
+    （続く受領書ブロックは読まない）。さらに行内が赤文字（黒との二重記載の控え）の
+    明細はフォント色で判定してスキップし、二重計上を防ぐ。
+    (items, excluded, kari_date) を返す。"""
+    wb = load_workbook(fileobj, data_only=True)  # 色判定のため read_only にしない（仮納品書は小サイズ）
     items, excluded, date_votes = [], [], []
     for ws in wb.worksheets:
-        rows = list(ws.iter_rows(values_only=True))
+        cell_rows = list(ws.iter_rows())
+        rows = [[c.value for c in r] for r in cell_rows]
         # 「日付」を含む行から出荷日を採取（メモ等の日付を拾わないようヘッダー付近に限定）
         for row in rows[:14]:
             if any("日付" in normalize(c) for c in row):
@@ -203,7 +228,6 @@ def parse_karinouhin(fileobj):
                     if d:
                         date_votes.append(d)
         # 最初の「品名&数量」ヘッダー = 仮納品書の明細ブロック。
-        # 最初の「合計」で止めるので、続く受領書ブロックは読まない（＝二重計上しない）。
         hidx, cmap = None, None
         for i, row in enumerate(rows):
             nc = [normalize(c) for c in row]
@@ -214,12 +238,21 @@ def parse_karinouhin(fileobj):
             continue
         pcol, qcol = cmap["品名"], cmap["数量"]
         lcol, bcol = cmap.get("lot"), cmap.get("備考")
-        for row in rows[hidx + 1:]:
+        for ci in range(hidx + 1, len(cell_rows)):
+            row = rows[ci]
             name = row[pcol] if pcol < len(row) else None
             nn = normalize(name)
             if "合計" in nn or "受領" in nn:
                 break  # 仮納品書ブロックの終端で停止（受領書は読まない）
             if not nn:
+                continue
+            # 黒/赤の二重記載：赤文字の行は控え（黒の写し）なので除外
+            crow = cell_rows[ci]
+            name_cell = crow[pcol] if pcol < len(crow) else None
+            if _is_red_font(name_cell):
+                excluded.append({"製品名": str(name).strip(),
+                                 "数量": row[qcol] if qcol < len(row) else "",
+                                 "除外理由": "赤文字（二重記載の控え）", "シート": ws.title})
                 continue
             qty = first_num(row[qcol]) if qcol < len(row) else None
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
@@ -357,11 +390,24 @@ def to_workbook(rows, colorder, date_label=""):
     return bio
 
 # ================= 一括処理 =================
-def generate(karinouhin_fileobj, master_fileobj, master_filename, date_label=""):
+def generate(karinouhin_fileobjs, master_fileobj, master_filename, date_label=""):
+    """複数の仮納品書を受け取り（単一でも可）、まとめて1枚の出荷連絡表に集計する。"""
+    if not isinstance(karinouhin_fileobjs, (list, tuple)):
+        karinouhin_fileobjs = [karinouhin_fileobjs]
     master_index, n = load_master(master_fileobj, master_filename)
-    items, excluded, kari_date = parse_karinouhin(karinouhin_fileobj)
-    agg = aggregate(items)
+    items, excluded, dates, per_file = [], [], [], []
+    for f in karinouhin_fileobjs:
+        it, ex, kd = parse_karinouhin(f)
+        items += it
+        excluded += ex
+        if kd:
+            dates.append(kd)
+        per_file.append({"ファイル": getattr(f, "name", "(不明)"),
+                         "明細(資材除外後)": len(it), "除外": len(ex),
+                         "日付": kd.isoformat() if kd else "(取得できず)"})
+    agg = aggregate(items)  # 製品×ロットでファイル横断に合算
     rows, colorder = build_rows(agg, master_index)
+    kari_date = Counter(dates).most_common(1)[0][0] if dates else None
     # 出荷日: ユーザー入力 > 仮納品書から自動取得 > 本日（必ず日付を付ける）
     eff_date = (date_label or "").strip() or (kari_date.isoformat() if kari_date else datetime.date.today().isoformat())
     stats = {
@@ -371,8 +417,10 @@ def generate(karinouhin_fileobj, master_fileobj, master_filename, date_label="")
         "要確認 行数": sum(1 for r in rows if r["要確認"]),
         "出荷日": eff_date,
         "日付自動取得": bool(kari_date),
+        "ファイル数": len(karinouhin_fileobjs),
+        "日付一覧": sorted({d.isoformat() for d in dates}),
     }
-    debug = {"items": items, "excluded": excluded}
+    debug = {"items": items, "excluded": excluded, "per_file": per_file}
     return rows, colorder, stats, debug
 
 if __name__ == "__main__":
