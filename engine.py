@@ -64,8 +64,14 @@ def parse_date(s):
 # ---------------- 資材判定 ----------------
 SHIZAI_EXACT = {"容器", "ポンプ", "キャップ", "化粧箱", "6コ箱", "外装", "ラベル",
                 "シール", "中栓", "スパチュラ", "袋", "箱", "台紙", "パンフ",
-                "リーフレット", "説明書", "個箱", "内箱", "外箱"}
+                "リーフレット", "説明書", "個箱", "内箱", "外箱",
+                "パウチ", "シュリンク", "スポイド", "スポイト", "バーコードラベル", "副資材"}
 _SHIZAI_NORM = {normalize(x) for x in SHIZAI_EXACT}
+# 「○○ラベル」「○○パウチ」等、資材名で終わる行も資材とみなす（語尾一致）
+SHIZAI_SUFFIX = ("バーコードラベル", "ラベル", "パウチ", "キャップ", "容器", "シュリンク",
+                 "シール", "中栓", "台紙", "スポイド", "スポイト", "外装", "化粧箱",
+                 "個箱", "内箱", "外箱", "6コ箱", "６コ箱")
+_SHIZAI_SUFFIX_NORM = tuple(normalize(s) for s in SHIZAI_SUFFIX)
 
 def is_shizai(name):
     if name is None:
@@ -73,7 +79,10 @@ def is_shizai(name):
     raw = str(name)
     if "残資材" in raw:
         return True
-    return normalize(raw) in _SHIZAI_NORM
+    n = normalize(raw)
+    if n in _SHIZAI_NORM:
+        return True
+    return n.endswith(_SHIZAI_SUFFIX_NORM)  # 「…ラベル」等の資材行
 
 # ================= 商品マスタ読み込み =================
 def _sheets_from(fileobj, filename):
@@ -265,15 +274,15 @@ def parse_karinouhin(fileobj):
                                  "除外理由": "赤文字（二重記載の控え）", "シート": ws.title, "日付": sd_str})
                 continue
             raw = str(name)
-            # 「○○ 残資材」行＝資材ブロックの開始。以降このブロックの明細は全て資材として除外。
-            if "残資材" in raw:
+            # 「○○ 残資材」「ご支給原料」行＝資材/支給ブロックの開始。以降の明細は全て除外。
+            if "残資材" in raw or "支給" in raw:
                 zanzai = True
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材ブロック(開始)", "シート": ws.title, "日付": sd_str})
+                                 "除外理由": "残資材/支給ブロック(開始)", "シート": ws.title, "日付": sd_str})
                 continue
             if zanzai:
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材ブロック", "シート": ws.title, "日付": sd_str})
+                                 "除外理由": "残資材/支給ブロック", "シート": ws.title, "日付": sd_str})
                 continue
             qty = first_num(qcell)
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
