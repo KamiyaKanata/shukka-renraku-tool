@@ -13,17 +13,8 @@ _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _preview_df(rows, colorder):
-    """ケース列の見出しを「ケース＋空欄」に整え、色なしの表として返す。"""
-    df = pd.DataFrame(rows)[colorder]
-    labels, blank_n = [], 0
-    for c in colorder:
-        if c.startswith("ケース") and c != "ケース①":
-            blank_n += 1
-            labels.append(" " * blank_n)  # 列名の一意性は半角スペース数で確保
-        else:
-            labels.append(engine.display_header(c))
-    df.columns = labels
-    return df
+    """色なしの表として返す（金額なし・ケースは1列、2つ目以降は下の行）。"""
+    return pd.DataFrame(rows)[colorder]
 
 
 def _push_history(filename, data, summary):
@@ -55,7 +46,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v2.5（原料は数量g×単価/kgで金額計算）"
+APP_VERSION = "v2.6（金額は出さず単価のみ／ケースは下の行に積む）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 

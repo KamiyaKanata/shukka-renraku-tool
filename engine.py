@@ -339,9 +339,8 @@ def aggregate(items):
             agg[key]["cases"][nyusu] += hako
     return list(agg.values())
 
-BASE_LEFT = ["製品名", "ロット", "出荷数"]
-BASE_RIGHT = ["商品CD", "処方番号", "単価", "金額", "要確認", "メモ"]
-_CIRC = "①②③④⑤⑥⑦⑧⑨⑩"
+# 列構成: 金額は出さない。ケースは1列のみ（2つ目以降は下の行に積む）。
+COLORDER = ["製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
 
 def _num_out(q):
     """整数ならint、小数あり（バルクのkg等）ならそのまま小数で返す。"""
@@ -368,14 +367,14 @@ def _fuzzy_master_lookup(name, master_index):
     return [], ""
 
 def build_rows(agg, master_index):
-    """rows と列順(colorder)を返す。ケースは掛け算ごとに ケース①/ケース②… の列に展開。"""
-    prepared, maxk = [], 0
+    """rows と列順(COLORDER)を返す。金額は出さない。製品ごとに1行＋
+    2つ目以降のケースは『下の行』に積む（他列は空欄）。"""
+    colorder = list(COLORDER)
+    rows = []
     for a in sorted(agg, key=lambda x: normalize(x["製品名"])):
         terms = _case_terms(a)
-        maxk = max(maxk, len(terms))
         missing_all = a.get("数量欠落") and a["数量"] == 0  # 数量が全く取れていない
         note = ""  # 要確認にはしない補足（あいまい一致・単位など）
-        genryo = False  # 原料(単価/kg・数量はg)→金額計算で1000分の1する
         if missing_all:
             chosen, flags = None, ["数量が空（要確認）"]
         else:
@@ -386,43 +385,33 @@ def build_rows(agg, master_index):
             flags = list(flags)
             if a.get("数量欠落"):
                 flags.append("一部明細で数量が空（要確認）")
-            if chosen and "原料" in (chosen.get("シート") or ""):  # 原料: 数量はg・単価は/kg
-                genryo = True
-                note = (note + " / " if note else "") + "原料(数量g×単価/kg)"
+            if chosen and "原料" in (chosen.get("シート") or ""):  # 原料は単価が/kg（補足表示）
+                note = (note + " / " if note else "") + "原料（単価は/kg）"
         tanka = chosen["単価"] if chosen else None
-        prepared.append((a, chosen, flags, tanka, terms, missing_all, note, genryo))
-    case_cols = ["ケース%s" % _CIRC[i] for i in range(maxk)]
-    colorder = BASE_LEFT + case_cols + BASE_RIGHT
-    rows = []
-    for a, chosen, flags, tanka, terms, missing_all, note, genryo in prepared:
         memo = " / ".join([x for x in flags + ([note] if note else []) if x])
-        kingaku = None
-        if tanka and not missing_all:
-            kingaku = int(round(tanka * a["数量"] / (1000.0 if genryo else 1.0)))  # 原料はg→kg換算
-        row = {
+        rows.append({
             "製品名": a["製品名"], "ロット": a["Lot"],
             "出荷数": ("" if missing_all else _num_out(a["数量"])),
+            "ケース": terms[0] if terms else "",
             "商品CD": chosen["商品CD"] if chosen else "",
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
-            "金額": kingaku,
             "要確認": "要確認" if flags else "",  # noteは要確認にしない
             "メモ": memo,
-        }
-        for i, col in enumerate(case_cols):
-            row[col] = terms[i] if i < len(terms) else ""
-        rows.append(row)
+        })
+        for t in terms[1:]:  # 2つ目以降のケースは下の行へ（他列は空欄）
+            cont = {k: "" for k in colorder}
+            cont["ケース"] = t
+            rows.append(cont)
     return rows, colorder
 
 # ================= 出力(xlsx) =================
-_WIDTHS = {"製品名": 34, "ロット": 10, "出荷数": 9, "商品CD": 11,
-           "処方番号": 16, "単価": 9, "金額": 12, "要確認": 8, "メモ": 42}
-_NUMCOLS = {"単価", "金額", "出荷数"}
+_WIDTHS = {"製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 11, "商品CD": 11,
+           "処方番号": 16, "単価": 9, "要確認": 8, "メモ": 42}
+_NUMCOLS = {"単価", "出荷数"}
 
 def display_header(col):
-    """ヘッダー表示名。ケース列は先頭だけ「ケース」、2列目以降は空欄にする。"""
-    if col.startswith("ケース"):
-        return "ケース" if col == "ケース①" else ""
+    """ヘッダー表示名（現在は見たままを返す）。"""
     return col
 
 _INVALID_SHEET = re.compile(r"[\[\]\:\*\?\/\\]")
@@ -555,12 +544,11 @@ if __name__ == "__main__":
           "/ 除外:", len(debug["excluded"]), "/ シート数:", stats["シート数"], "/ 日付:", stats["日付一覧"])
     for g in groups:
         print("=" * 90, "\n■ 出荷日:", g["日付"], "（", len(g["rows"]), "行 ）")
-        casecols = [c for c in g["colorder"] if c.startswith("ケース")]
         for r in g["rows"]:
-            cases = " ".join(r.get(c, "") for c in casecols).strip()
-            print("%-26s Lot:%-6s 数:%8s [%s] 単価:%s 金額:%s %s" % (
-                r["製品名"][:26], r["ロット"], str(r["出荷数"]), cases,
-                str(r["単価"]), str(r["金額"]), ("[" + r["メモ"] + "]") if r["要確認"] else ""))
+            print("%-26s Lot:%-6s 数:%8s [%s] 単価:%s %s" % (
+                str(r.get("製品名", ""))[:26], r.get("ロット", ""), str(r.get("出荷数", "")),
+                r.get("ケース", ""), str(r.get("単価", "")),
+                ("[" + r["メモ"] + "]") if r.get("要確認") else ""))
     with open(out, "wb") as f:
         f.write(to_workbook(groups).read())
     print("-" * 90); print("saved:", out)
