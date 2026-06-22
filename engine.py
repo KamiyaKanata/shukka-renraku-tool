@@ -278,16 +278,15 @@ def parse_karinouhin(fileobj):
                                  "除外理由": "赤文字（二重記載の控え）", "シート": ws.title, "日付": sd_str})
                 continue
             raw = str(name)
-            # 「○○ 残資材」行＝資材ブロックの開始。以降このブロックの明細は全て資材として除外。
-            # ※「ご支給原料」等の原料はブロック除外しない（原料は出荷連絡表に記載する）。
-            if "残資材" in raw:
+            # 「○○ 残資材」「ご支給原料」行＝資材/原料ブロックの開始。以降のブロック明細は全て除外。
+            if "残資材" in raw or "支給" in raw:
                 zanzai = True
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材ブロック(開始)", "シート": ws.title, "日付": sd_str})
+                                 "除外理由": "残資材/支給ブロック(開始)", "シート": ws.title, "日付": sd_str})
                 continue
             if zanzai:
                 excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材ブロック", "シート": ws.title, "日付": sd_str})
+                                 "除外理由": "残資材/支給ブロック", "シート": ws.title, "日付": sd_str})
                 continue
             qty = first_num(qcell)
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
@@ -385,8 +384,8 @@ def build_rows(agg, master_index):
             flags = list(flags)
             if a.get("数量欠落"):
                 flags.append("一部明細で数量が空（要確認）")
-            if chosen and "原料" in (chosen.get("シート") or ""):  # 原料は単価が/kg（補足表示）
-                note = (note + " / " if note else "") + "原料（単価は/kg）"
+            if chosen and "原料" in (chosen.get("シート") or ""):  # マスタの原料タブ一致＝原料 → 載せない
+                continue
         tanka = chosen["単価"] if chosen else None
         memo = " / ".join([x for x in flags + ([note] if note else []) if x])
         rows.append({
