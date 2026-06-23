@@ -227,6 +227,31 @@ def _is_red_font(cell):
         return True
     return False
 
+_DEST_SKIP = ("仮納品書", "受領書", "日付", "御中", "下記", "サンブルーム", "大阪市",
+              "工場", "品名", "数量", "合計", "ご担当", "申し上げ", "No.")
+_DEST_SKIP_NORM = tuple(normalize(x) for x in _DEST_SKIP)
+def _clean_dest(s):
+    """発送先名から法人格・御中等を除く。例『株式会社ゼロ・インフィニティ』→『ゼロ・インフィニティ』"""
+    s = unicodedata.normalize("NFKC", str(s or ""))
+    s = re.sub(r"(株式会社|有限会社|合同会社|合資会社|㈱|㈲|\(株\)|（株）)", "", s)
+    return s.replace("御中", "").strip("　 ").strip()
+
+def _find_dest(rows, hidx, pcol):
+    """ヘッダー前の行から発送先（宛先）を推定。先頭側の会社名らしい1件を返す。"""
+    for row in rows[1:hidx]:
+        for c in row:
+            if c in (None, "") or isinstance(c, (datetime.date, datetime.datetime, int, float)):
+                continue
+            if parse_date(c):       # 日付っぽいセルは除外
+                continue
+            s = str(c).strip()
+            sn = normalize(s)       # 全角スペース除去後で判定（"仮　納　品　書"対策）
+            if not sn or any(k in sn for k in _DEST_SKIP_NORM):
+                continue
+            if len(sn) >= 3:
+                return s
+    return ""
+
 def parse_karinouhin(fileobj):
     """仮納品書を解析。最初の「品名&数量」ブロックのみを読み、最初の「合計」で停止
     （続く受領書ブロックは読まない）。さらに行内が赤文字（黒との二重記載の控え）の
@@ -260,6 +285,7 @@ def parse_karinouhin(fileobj):
             continue
         pcol, qcol = cmap["品名"], cmap["数量"]
         lcol, bcol = cmap.get("lot"), cmap.get("備考")
+        sheet_dest = _find_dest(rows, hidx, pcol)  # バルク出荷先の表示に使用
         zanzai = False  # 「○○ 残資材」ヘッダー以降はブロック全体が資材なので除外
         for ci in range(hidx + 1, len(cell_rows)):
             row = rows[ci]
@@ -298,6 +324,7 @@ def parse_karinouhin(fileobj):
                 "備考": str(bikou).strip() if bikou else "",
                 "シート": ws.title,
                 "日付": sheet_date,           # 集計のグルーピングキー（date or None）
+                "発送先": sheet_dest,         # バルク出荷先の表示用
             }
             if is_shizai(name):  # 個別名の資材（容器/ポンプ等）も念のため除外
                 excluded.append({**rec, "日付": sd_str, "除外理由": "資材/残資材"})
@@ -309,14 +336,24 @@ def parse_karinouhin(fileobj):
 
 # ================= 集計・突合 =================
 def parse_case_terms(text):
-    """備考のケース構成文字列を (入数, 箱数) のリストへ。例 '300×3c/s、100×1c/s' -> [(300,3),(100,1)]"""
+    """備考のケース構成を (入数, 箱数) のリストへ。
+    例 '300×3c/s、100×1c/s' -> [(300,3),(100,1)] / '1c/s'(バルク) -> [(None,1)]"""
     if not text:
         return []
     t = unicodedata.normalize("NFKC", str(text))
     pairs = []
-    for m in re.finditer(r"(\d[\d,]*)\s*[x×*]\s*(\d[\d,]*)", t):
+    def _take(m):
         try:
             pairs.append((float(m.group(1).replace(",", "")), float(m.group(2).replace(",", ""))))
+        except ValueError:
+            pass
+        return " "
+    # 「入数×箱数」を先に拾って消す
+    t2 = re.sub(r"(\d[\d,]*)\s*[x×*]\s*(\d[\d,]*)", _take, t)
+    # 残った「N c/s」(×なし＝バルク等)は 入数なし×箱数
+    for m in re.finditer(r"(\d[\d,]*)\s*[cＣ]\s*[/／]\s*[sＳ]", t2):
+        try:
+            pairs.append((None, float(m.group(1).replace(",", ""))))
         except ValueError:
             pass
     return pairs
@@ -328,7 +365,10 @@ def aggregate(items):
         key = (normalize(it["製品名"]), it["Lot"])
         if key not in agg:
             agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0,
-                        "cases": defaultdict(float), "数量欠落": False}
+                        "cases": defaultdict(float), "数量欠落": False,
+                        "発送先": it.get("発送先", "")}
+        if not agg[key]["発送先"] and it.get("発送先"):
+            agg[key]["発送先"] = it["発送先"]
         q = it["数量"]
         if q is None:
             agg[key]["数量欠落"] = True   # 数量が空の明細あり → 後段で要確認
@@ -338,17 +378,37 @@ def aggregate(items):
             agg[key]["cases"][nyusu] += hako
     return list(agg.values())
 
-# 列構成: 金額は出さない。ケースは1列のみ（2つ目以降は下の行に積む）。
-COLORDER = ["製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
+# 詳細シートの列（メインの印刷シートとは別。金額は出さない）
+DETAIL_COLS = ["日付", "製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
 
 def _num_out(q):
     """整数ならint、小数あり（バルクのkg等）ならそのまま小数で返す。"""
     q = float(q)
     return int(q) if q.is_integer() else round(q, 3)
 
-def _case_terms(a):
-    """入数の降順で '入数×箱数' のリスト。"""
-    return ["%d×%d" % (int(n), int(h)) for n, h in sorted(a["cases"].items(), key=lambda kv: -kv[0]) if h]
+def _case_lines(a):
+    """入数の降順で (入数 or None, 箱数) のリスト。バルクは入数None。"""
+    return [(n, h) for n, h in sorted(a["cases"].items(), key=lambda kv: -(kv[0] or 0)) if h]
+
+def _cases_str(lines):
+    """詳細表示用の文字列。例 [(12,16),(8,1)] -> '12×16、8×1' / [(None,1)] -> '1c/s'"""
+    return "、".join(("%d×%d" % (int(n), int(h)) if n else "%dc/s" % int(h)) for n, h in lines)
+
+# 製品名末尾の容量（10ml/980g/150ｍL 等）を分離。全角/半角の混在に対応した文字クラス。
+_YORYO_UNIT = (r"(?:[mｍＭ][lLｌＬ]|[kＫｋ][gＧｇ]|㎏|㎖|[gＧｇ]|[lLｌＬℓ]|[cＣ][cＣ]|個|本|錠|包|枚)")
+_YORYO_RE = re.compile(r"[\s　]*([0-9０-９][0-9０-９.．,，]*\s*" + _YORYO_UNIT + r")[\s　]*$")
+
+def _split_name(name):
+    """製品名から末尾の容量を分離。バルク(名前に『バルク』)は容量なし・bulk=True。
+    返り値: (製品名_本体, 容量, bulk)"""
+    raw = str(name).strip()
+    if "バルク" in raw:
+        main = re.sub(r"[\s　]*バルク[\s　]*$", "", raw).strip()
+        return (main or raw), "", True
+    m = _YORYO_RE.search(raw)
+    if m:
+        return raw[:m.start()].strip(), m.group(1).strip(), False
+    return raw, "", False
 
 def _norm_tokens(s):
     """NFKC+小文字でトークン分割（空白境界を残す）。全角スペースは半角化される。"""
@@ -365,15 +425,14 @@ def _fuzzy_master_lookup(name, master_index):
             return e, "末尾「%s」を無視してマスタ一致" % toks[-1].upper()
     return [], ""
 
-def build_rows(agg, master_index):
-    """rows と列順(COLORDER)を返す。金額は出さない。製品ごとに1行＋
-    2つ目以降のケースは『下の行』に積む（他列は空欄）。"""
-    colorder = list(COLORDER)
-    rows = []
+def build_records(agg, master_index):
+    """製品ごとの records を返す（印刷シート・詳細シートの両方の元データ）。原料は除外。"""
+    records = []
     for a in sorted(agg, key=lambda x: normalize(x["製品名"])):
-        terms = _case_terms(a)
+        lines = _case_lines(a)
+        name_main, yoryo, bulk = _split_name(a["製品名"])
         missing_all = a.get("数量欠落") and a["数量"] == 0  # 数量が全く取れていない
-        note = ""  # 要確認にはしない補足（あいまい一致・単位など）
+        note = ""
         if missing_all:
             chosen, flags = None, ["数量が空（要確認）"]
         else:
@@ -387,32 +446,21 @@ def build_rows(agg, master_index):
             if chosen and "原料" in (chosen.get("シート") or ""):  # マスタの原料タブ一致＝原料 → 載せない
                 continue
         tanka = chosen["単価"] if chosen else None
-        memo = " / ".join([x for x in flags + ([note] if note else []) if x])
-        rows.append({
-            "製品名": a["製品名"], "ロット": a["Lot"],
-            "出荷数": ("" if missing_all else _num_out(a["数量"])),
-            "ケース": terms[0] if terms else "",
+        records.append({
+            "製品名": a["製品名"], "name_main": name_main, "容量": yoryo, "bulk": bulk,
+            "発送先": a.get("発送先", ""), "ロット": a["Lot"],
+            "数量": (None if missing_all else a["数量"]),
+            "cases": lines,
             "商品CD": chosen["商品CD"] if chosen else "",
             "処方番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
-            "要確認": "要確認" if flags else "",  # noteは要確認にしない
-            "メモ": memo,
+            "要確認": bool(flags),
+            "メモ": " / ".join([x for x in flags + ([note] if note else []) if x]),
         })
-        for t in terms[1:]:  # 2つ目以降のケースは下の行へ（他列は空欄）
-            cont = {k: "" for k in colorder}
-            cont["ケース"] = t
-            rows.append(cont)
-    return rows, colorder
+    return records
 
 # ================= 出力(xlsx) =================
-_WIDTHS = {"製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 11, "商品CD": 11,
-           "処方番号": 16, "単価": 9, "要確認": 8, "メモ": 42}
-_NUMCOLS = {"単価", "出荷数"}
-
-def display_header(col):
-    """ヘッダー表示名（現在は見たままを返す）。"""
-    return col
-
+_FONT = "Yu Gothic"
 _INVALID_SHEET = re.compile(r"[\[\]\:\*\?\/\\]")
 
 def _safe_sheet_title(label, used):
@@ -427,46 +475,124 @@ def _safe_sheet_title(label, used):
     used.add(t)
     return t
 
-def _write_sheet(ws, rows, colorder, date_label, border):
-    last = ws.cell(row=1, column=len(colorder)).column_letter
-    ws.merge_cells("A1:%s1" % last)
-    ws["A1"] = "出荷連絡表　%s" % date_label
-    ws["A1"].font = Font(name="Yu Gothic", bold=True, size=14)
-    ws["A1"].alignment = Alignment(vertical="center", indent=1)
-    ws.row_dimensions[1].height = 30
-    for j, h in enumerate(colorder, 1):
-        c = ws.cell(row=2, column=j, value=display_header(h))
-        c.font = Font(name="Yu Gothic", bold=True)
+def _qty_disp(rec):
+    """出荷数の表示。バルクは『22㎏』、それ以外は数量、空はブランク。"""
+    if rec["数量"] is None:
+        return ""
+    v = _num_out(rec["数量"])
+    return ("%s㎏" % v) if rec["bulk"] else v
+
+# 実物テンプレ（事務所→工場）に合わせた列幅
+_PRINT_W = {"A": 39.1, "B": 13.9, "C": 15.8, "D": 7.9, "E": 5.4, "F": 7.9, "G": 6.7}
+
+def _write_print_sheet(ws, records, date_label):
+    """出荷連絡.xlsx と同じ印刷フォーマット（A4縦・1製品2行・容量右詰・ケースは入数×箱数C/S）。"""
+    thin = Side(style="thin", color="000000")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    cen = Alignment(horizontal="center", vertical="center")
+    rgt = Alignment(horizontal="right", vertical="center")
+    lft = Alignment(horizontal="left", vertical="center")
+    # 印刷設定
+    ws.page_setup.orientation = "portrait"
+    ws.page_setup.paperSize = 9   # A4
+    ws.page_setup.scale = 90
+    ws.page_margins.left = 0.59; ws.page_margins.right = 0.33
+    ws.page_margins.top = 1.0; ws.page_margins.bottom = 0.45
+    for col, w in _PRINT_W.items():
+        ws.column_dimensions[col].width = w
+    # 見出し
+    ws.merge_cells("A1:B1")
+    ws["A1"] = "出　荷　連　絡　表　"
+    ws["A1"].font = Font(name=_FONT, bold=True, size=14)
+    ws["A1"].alignment = cen
+    ws["C1"] = date_label
+    ws["C1"].font = Font(name=_FONT); ws["C1"].alignment = cen
+    ws.merge_cells("A3:G3")
+    ws["A3"] = "事務所（ＦＡＸ06-6453-3916）ｏｒ　honsha@sunbloom-cosme.co.jp　⇒工　場"
+    ws["A3"].font = Font(name=_FONT); ws["A3"].alignment = cen
+    for col, h in zip("ABCD", ["製品名", "ロット", "出荷数", "ケース数"]):
+        c = ws["%s5" % col]; c.value = h
+        c.font = Font(name=_FONT, bold=True); c.alignment = cen; c.border = border
+    # 明細（1製品2行以上）
+    r = 6
+    for rec in records:
+        nrows = max(2, len(rec["cases"]))
+        nm = rec["name_main"] + ("　【要確認】" if rec["要確認"] else "")
+        ws.cell(r, 1, nm).alignment = lft
+        if rec["bulk"]:
+            d = _clean_dest(rec["発送先"])
+            sub = ("%sへバルク出荷" % d) if d else "バルク出荷"
+        else:
+            sub = rec["容量"]
+        ws.cell(r + 1, 1, sub).alignment = rgt
+        ws.cell(r, 2, rec["ロット"]).alignment = cen
+        ws.cell(r, 3, _qty_disp(rec)).alignment = rgt
+        for i in range(nrows):
+            rr = r + i
+            ws.cell(rr, 5, "×").alignment = cen
+            ws.cell(rr, 7, "C/S").alignment = cen
+            if i < len(rec["cases"]):
+                nyu, hako = rec["cases"][i]
+                if nyu:
+                    ws.cell(rr, 4, int(nyu)).alignment = rgt
+                ws.cell(rr, 6, int(hako)).alignment = rgt
+        # 罫線＋フォント
+        for rr in range(r, r + nrows):
+            for cc in range(1, 8):
+                cell = ws.cell(rr, cc)
+                cell.border = border
+                cell.font = Font(name=_FONT, size=10.5)
+        # ロット・出荷数は製品の行数ぶん結合（実物同様）
+        if nrows >= 2:
+            ws.merge_cells(start_row=r, start_column=2, end_row=r + nrows - 1, end_column=2)
+            ws.merge_cells(start_row=r, start_column=3, end_row=r + nrows - 1, end_column=3)
+        r += nrows
+    ws.print_area = "A1:G%d" % max(r - 1, 5)
+
+_DETAIL_W = {"日付": 11, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
+             "商品CD": 11, "処方番号": 16, "単価": 9, "要確認": 8, "メモ": 40}
+
+def _write_detail_sheet(ws, dated_records):
+    """確認用の詳細シート（商品CD・処方番号・単価・要確認・メモを含む）。"""
+    thin = Side(style="thin", color="BFBFBF")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    cols = DETAIL_COLS
+    ws.merge_cells("A1:%s1" % ws.cell(row=1, column=len(cols)).column_letter)
+    ws["A1"] = "出荷連絡表（詳細・確認用）"
+    ws["A1"].font = Font(name=_FONT, bold=True, size=12)
+    for j, h in enumerate(cols, 1):
+        c = ws.cell(2, j, h); c.font = Font(name=_FONT, bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center"); c.border = border
-    for i, r in enumerate(rows, 3):
-        for j, k in enumerate(colorder, 1):
-            c = ws.cell(row=i, column=j, value=r.get(k, ""))
-            c.font = Font(name="Yu Gothic", size=10.5); c.border = border
-            if k in _NUMCOLS:
-                c.number_format = "#,##0.###" if k == "出荷数" else "#,##0"  # 出荷数は小数(kg)も表示
+    i = 3
+    for date_label, rec in dated_records:
+        vals = {
+            "日付": date_label, "製品名": rec["製品名"], "ロット": rec["ロット"],
+            "出荷数": ("" if rec["数量"] is None else _num_out(rec["数量"])),
+            "ケース": _cases_str(rec["cases"]),
+            "商品CD": rec["商品CD"], "処方番号": rec["処方番号"], "単価": rec["単価"],
+            "要確認": ("要確認" if rec["要確認"] else ""), "メモ": rec["メモ"],
+        }
+        for j, k in enumerate(cols, 1):
+            c = ws.cell(i, j, vals.get(k, "")); c.font = Font(name=_FONT, size=10.5); c.border = border
+            if k in ("単価", "出荷数"):
+                c.number_format = "#,##0.###"
                 c.alignment = Alignment(horizontal="right", vertical="top")
             else:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
-    for j, k in enumerate(colorder, 1):
-        ws.column_dimensions[ws.cell(row=2, column=j).column_letter].width = _WIDTHS.get(k, 12)
+        i += 1
+    for j, k in enumerate(cols, 1):
+        ws.column_dimensions[ws.cell(row=2, column=j).column_letter].width = _DETAIL_W.get(k, 12)
     ws.freeze_panes = "A3"
 
-def to_workbook(groups, colorder=None, date_label=""):
-    """groups（generateの返り値）を、日付ごとのシートを持つ1ブックにする。
-    後方互換: to_workbook(rows, colorder, date_label) の旧呼び出しも受け付ける。"""
-    if groups and isinstance(groups, list) and groups and isinstance(groups[0], dict) and "rows" in groups[0]:
-        gs = groups
-    else:  # 旧シグネチャ（rows, colorder, date_label）
-        gs = [{"日付": date_label, "rows": groups, "colorder": colorder}]
-    thin = Side(style="thin", color="BFBFBF")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+def to_workbook(groups, *_ignore, **_kw):
+    """groups = [{"日付","records":[...]}, ...] を、出荷日ごとの印刷シート＋詳細シート1枚に。"""
     wb = Workbook(); wb.remove(wb.active)
     used = set()
-    for g in gs:
-        if not g.get("colorder"):
-            continue
+    for g in groups:
         ws = wb.create_sheet(_safe_sheet_title(g["日付"], used))
-        _write_sheet(ws, g["rows"], g["colorder"], g["日付"], border)
+        _write_print_sheet(ws, g.get("records", []), g["日付"])
+    dws = wb.create_sheet(_safe_sheet_title("詳細", used))
+    _write_detail_sheet(dws, [(g["日付"], r) for g in groups for r in g.get("records", [])])
     if not wb.worksheets:
         wb.create_sheet("出荷連絡表")
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
@@ -504,18 +630,17 @@ def generate(karinouhin_fileobjs, master_fileobj, master_filename, date_label=""
             groups_map[d.isoformat() if d else today].append(it)
     groups = []
     for label in sorted(groups_map.keys()):
-        rows, colorder = build_rows(aggregate(groups_map[label]), master_index)
-        groups.append({"日付": label, "rows": rows, "colorder": colorder,
+        recs = build_records(aggregate(groups_map[label]), master_index)
+        groups.append({"日付": label, "records": recs,
                        "明細数": len(groups_map[label]),
-                       "要確認": sum(1 for r in rows if r["要確認"])})
+                       "要確認": sum(1 for r in recs if r["要確認"])})
     if not groups:  # 明細ゼロでも空の1シートは作る
-        rows, colorder = build_rows([], master_index)
         groups.append({"日付": override or (overall.isoformat() if overall else today),
-                       "rows": rows, "colorder": colorder, "明細数": 0, "要確認": 0})
+                       "records": [], "明細数": 0, "要確認": 0})
     stats = {
         "マスタ商品数": n,
         "仮納品書 明細数(資材除外後)": len(items),
-        "出荷連絡表 行数": sum(len(g["rows"]) for g in groups),
+        "出荷連絡表 行数": sum(len(g["records"]) for g in groups),
         "要確認 行数": sum(g["要確認"] for g in groups),
         "シート数": len(groups),
         "日付一覧": [g["日付"] for g in groups],
@@ -542,12 +667,14 @@ if __name__ == "__main__":
     print("マスタ商品数:", stats["マスタ商品数"], "/ 明細:", stats["仮納品書 明細数(資材除外後)"],
           "/ 除外:", len(debug["excluded"]), "/ シート数:", stats["シート数"], "/ 日付:", stats["日付一覧"])
     for g in groups:
-        print("=" * 90, "\n■ 出荷日:", g["日付"], "（", len(g["rows"]), "行 ）")
-        for r in g["rows"]:
-            print("%-26s Lot:%-6s 数:%8s [%s] 単価:%s %s" % (
-                str(r.get("製品名", ""))[:26], r.get("ロット", ""), str(r.get("出荷数", "")),
-                r.get("ケース", ""), str(r.get("単価", "")),
-                ("[" + r["メモ"] + "]") if r.get("要確認") else ""))
+        print("=" * 90, "\n■ 出荷日:", g["日付"], "（", len(g["records"]), "製品 ）")
+        for r in g["records"]:
+            print("%-24s 容量:%-7s Lot:%-5s 数:%7s ケース:%-14s 単価:%s %s%s" % (
+                r["name_main"][:24], r["容量"], r["ロット"],
+                ("" if r["数量"] is None else str(_num_out(r["数量"]))),
+                _cases_str(r["cases"]), str(r["単価"]),
+                ("[バルク→%s]" % _clean_dest(r["発送先"])) if r["bulk"] else "",
+                ("[要確認 " + r["メモ"] + "]") if r["要確認"] else ""))
     with open(out, "wb") as f:
         f.write(to_workbook(groups).read())
     print("-" * 90); print("saved:", out)

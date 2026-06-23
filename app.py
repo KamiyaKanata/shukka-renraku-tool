@@ -12,9 +12,17 @@ st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _preview_df(rows, colorder):
-    """色なしの表として返す（金額なし・ケースは1列、2つ目以降は下の行）。"""
-    return pd.DataFrame(rows)[colorder]
+def _preview_df(records):
+    """records を確認用テーブルに（実際のExcelは『印刷シート＋詳細シート』で出力）。"""
+    rows = [{
+        "製品名": r["製品名"], "ロット": r["ロット"],
+        "出荷数": ("" if r["数量"] is None else engine._num_out(r["数量"])),
+        "ケース": engine._cases_str(r["cases"]),
+        "商品CD": r["商品CD"], "処方番号": r["処方番号"],
+        "単価": ("" if r["単価"] is None else r["単価"]),
+        "要確認": ("要確認" if r["要確認"] else ""), "メモ": r["メモ"],
+    } for r in records]
+    return pd.DataFrame(rows) if rows else pd.DataFrame({"(なし)": []})
 
 
 def _push_history(filename, data, summary):
@@ -46,7 +54,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v2.7（金額なし・原料は除外）"
+APP_VERSION = "v2.8（実物フォーマット＝印刷シート＋詳細シート）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
@@ -87,8 +95,8 @@ if go and kari and master:
 
     dates = stats["日付一覧"]
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("出荷連絡表 行数", stats["出荷連絡表 行数"])
-    m2.metric("要確認 行数", stats["要確認 行数"])
+    m1.metric("製品数", stats["出荷連絡表 行数"])
+    m2.metric("要確認 製品数", stats["要確認 行数"])
     m3.metric("出荷日(シート)数", stats["シート数"])
     m4.metric("仮納品書ファイル数", stats["ファイル数"])
 
@@ -110,12 +118,12 @@ if go and kari and master:
     summary = f"{len(dates)}シート / {stats['出荷連絡表 行数']}行 / 要確認{stats['要確認 行数']}"
     _push_history(fname, bio.getvalue(), summary)
 
-    # プレビュー（日付ごと）
-    st.markdown("#### 出荷連絡表（プレビュー・全文表示）")
+    # プレビュー（日付ごと）※実際のExcelは実物フォーマットの印刷シート＋詳細シート
+    st.markdown("#### 内容プレビュー（ダウンロードは実物フォーマットの印刷シート＋詳細シートで出力）")
     for g in groups:
         if len(groups) > 1:
-            st.markdown(f"**🗓 {g['日付']}**（{len(g['rows'])}行）")
-        st.table(_preview_df(g["rows"], g["colorder"]).style.hide(axis="index"))
+            st.markdown(f"**🗓 {g['日付']}**（{len(g['records'])}製品）")
+        st.table(_preview_df(g["records"]).style.hide(axis="index"))
 
     with st.expander(f"🔍 解析の内訳（読めた明細 {len(debug['items'])} 件 / 除外 {len(debug['excluded'])} 件）— 「商品が乗らない」原因の確認用"):
         if debug.get("per_file"):
