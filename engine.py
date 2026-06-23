@@ -488,6 +488,8 @@ _PRINT_W = {"A": 39.1, "B": 13.9, "C": 15.8, "D": 7.9, "E": 5.4, "F": 7.9, "G": 
 def _write_print_sheet(ws, records, date_label):
     """出荷連絡.xlsx と同じ印刷フォーマット（A4縦・1製品2行・容量右詰・ケースは入数×箱数C/S）。"""
     thin = Side(style="thin", color="000000")
+    dott = Side(style="dotted", color="000000")
+    no = Side(style=None)
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     cen = Alignment(horizontal="center", vertical="center")
     rgt = Alignment(horizontal="right", vertical="center")
@@ -536,11 +538,17 @@ def _write_print_sheet(ws, records, date_label):
                 if nyu:
                     ws.cell(rr, 4, int(nyu)).alignment = rgt
                 ws.cell(rr, 6, int(hako)).alignment = rgt
-        # 罫線＋フォント
-        for rr in range(r, r + nrows):
+        # 罫線（実物同様）：製品ごとに外枠は実線。A列の名前↔容量の内部横線は無し、
+        # ケース列(D-G)の内部横線は点線。左右は実線グリッド。
+        for i in range(nrows):
+            rr = r + i
+            first, last = (i == 0), (i == nrows - 1)
             for cc in range(1, 8):
+                inner_dot = cc >= 4  # D-G は内部点線、A-C は内部なし
+                top = thin if first else (dott if inner_dot else no)
+                bot = thin if last else (dott if inner_dot else no)
                 cell = ws.cell(rr, cc)
-                cell.border = border
+                cell.border = Border(left=thin, right=thin, top=top, bottom=bot)
                 cell.font = Font(name=_FONT, size=10.5)
         # ロット・出荷数は製品の行数ぶん結合（実物同様）
         if nrows >= 2:
