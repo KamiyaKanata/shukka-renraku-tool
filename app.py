@@ -4,9 +4,11 @@
 起動: ./.venv/bin/streamlit run app.py
 """
 import datetime
+import importlib
 import streamlit as st
 import pandas as pd
 import engine
+importlib.reload(engine)  # Streamlit Cloudの旧モジュール残留対策（app.pyと常に同じ版に揃える）
 
 st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", layout="wide")
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
@@ -54,7 +56,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v2.8（実物フォーマット＝印刷シート＋詳細シート）"
+APP_VERSION = "v2.8.1（実物フォーマット・engine強制リロード）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
