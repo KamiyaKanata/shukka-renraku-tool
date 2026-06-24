@@ -123,11 +123,13 @@ def _find_master_header(rows):
                     colmap["製品名"] = j
                 if (("商品cd" in c) or ("商品コード" in c)) and "商品CD" not in colmap:
                     colmap["商品CD"] = j
-                if "試作番号" in c and "試作番号" not in colmap:
+                # 処方番号は「試作番号／処方番号／初法番号」と表記ゆれがある
+                if (("試作番号" in c) or ("処方番号" in c) or ("初法番号" in c)) and "試作番号" not in colmap:
                     colmap["試作番号"] = j
                 if ("売上単価" in c or c == "単価") and "単価" not in colmap:
                     colmap["単価"] = j
-                if "価格更新" in c and "価格更新" not in colmap:
+                # 価格更新は「価格更新／単価更新」の表記ゆれあり
+                if (("価格更新" in c) or ("単価更新" in c)) and "価格更新" not in colmap:
                     colmap["価格更新"] = j
                 if c == "ロット" and "ロット" not in colmap:
                     colmap["ロット"] = j
