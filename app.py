@@ -15,11 +15,11 @@ _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def _detail_preview_df(groups):
-    """ダウンロードの『詳細シート』と同じ内容のプレビュー（商品CD昇順・曜日・CD0補正）。"""
+    """ダウンロードの『詳細シート』と同じ内容（得意先＝シート名／商品CD昇順／CD0補正）。"""
     dated = [(g["日付"], r) for g in groups for r in g["records"]]
     dated = sorted(dated, key=lambda dr: engine._cd_sortkey(dr[1]["商品CD"]))
     rows = [{
-        "日付": dl, "曜日": engine._weekday_jp(dl),
+        "得意先": r.get("得意先", ""),
         "製品名": r["製品名"], "ロット": r["ロット"],
         "出荷数": ("" if r["数量"] is None else engine._num_out(r["数量"])),
         "ケース": engine._cases_str(r["cases"]),
@@ -59,7 +59,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v2.9.1（プレビューを詳細シートと一致）"
+APP_VERSION = "v3.0（印刷=CD順+曜日／詳細=得意先列・日付は見出し横）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
@@ -125,6 +125,7 @@ if go and kari and master:
 
     # プレビュー＝ダウンロードの「詳細シート」と同じ内容。印刷用シートはダウンロードにのみ入る。
     st.markdown("#### 内容プレビュー（＝詳細シートと同じ。ダウンロードには別途『印刷用シート（実物フォーマット）』も入ります）")
+    st.caption("出荷日: " + "、".join(f"{d}（{engine._weekday_jp(d)}）" for d in dates))
     st.table(_detail_preview_df(groups).style.hide(axis="index"))
 
     with st.expander(f"🔍 解析の内訳（読めた明細 {len(debug['items'])} 件 / 除外 {len(debug['excluded'])} 件）— 「商品が乗らない」原因の確認用"):

@@ -366,7 +366,8 @@ def aggregate(items):
         if key not in agg:
             agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0,
                         "cases": defaultdict(float), "数量欠落": False,
-                        "発送先": it.get("発送先", "")}
+                        "発送先": it.get("発送先", ""),   # 配送先（〇〇御中）
+                        "得意先": it.get("シート", "")}   # 得意先（仮納品書のシート名）
         if not agg[key]["発送先"] and it.get("発送先"):
             agg[key]["発送先"] = it["発送先"]
         q = it["数量"]
@@ -378,8 +379,9 @@ def aggregate(items):
             agg[key]["cases"][nyusu] += hako
     return list(agg.values())
 
-# 詳細シートの列（メインの印刷シートとは別。金額は出さない）
-DETAIL_COLS = ["日付", "曜日", "製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
+# 詳細シートの列（メインの印刷シートとは別。金額は出さない）。先頭は得意先＝仮納品書シート名。
+# 日付・曜日は列にせず、タイトル横に表示する。
+DETAIL_COLS = ["得意先", "製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
 
 _WD_JP = "月火水木金土日"
 def _weekday_jp(date_str):
@@ -471,7 +473,7 @@ def build_records(agg, master_index):
         tanka = chosen["単価"] if chosen else None
         records.append({
             "製品名": a["製品名"], "name_main": name_main, "容量": yoryo, "bulk": bulk,
-            "発送先": a.get("発送先", ""), "ロット": a["Lot"],
+            "発送先": a.get("発送先", ""), "得意先": a.get("得意先", ""), "ロット": a["Lot"],
             "数量": (None if missing_all else a["数量"]),
             "cases": lines,
             "商品CD": chosen["商品CD"] if chosen else "",
@@ -480,6 +482,7 @@ def build_records(agg, master_index):
             "要確認": bool(flags),
             "メモ": " / ".join([x for x in flags + ([note] if note else []) if x]),
         })
+    records.sort(key=lambda r: _cd_sortkey(r["商品CD"]))  # 商品CD順（左右シート共通の並び）
     return records
 
 # ================= 出力(xlsx) =================
@@ -532,6 +535,8 @@ def _write_print_sheet(ws, records, date_label):
     ws["A1"].alignment = cen
     ws["C1"] = date_label
     ws["C1"].font = Font(name=_FONT); ws["C1"].alignment = cen
+    ws["D1"] = "（%s）" % _weekday_jp(date_label)  # 日付の右に曜日
+    ws["D1"].font = Font(name=_FONT); ws["D1"].alignment = Alignment(horizontal="left", vertical="center")
     ws.merge_cells("A3:G3")
     ws["A3"] = "事務所（ＦＡＸ06-6453-3916）ｏｒ　honsha@sunbloom-cosme.co.jp　⇒工　場"
     ws["A3"].font = Font(name=_FONT); ws["A3"].alignment = cen
@@ -580,26 +585,33 @@ def _write_print_sheet(ws, records, date_label):
         r += nrows
     ws.print_area = "A1:G%d" % max(r - 1, 5)
 
-_DETAIL_W = {"日付": 11, "曜日": 5, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
+_DETAIL_W = {"得意先": 20, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
              "商品CD": 11, "処方番号": 16, "単価": 9, "要確認": 8, "メモ": 40}
 
 def _write_detail_sheet(ws, dated_records):
-    """確認用の詳細シート（商品CD・処方番号・単価・要確認・メモを含む）。
-    商品CDの先頭3桁(得意先番号)で昇順に並べ、先頭0が落ちたCDは復元する。"""
+    """確認用の詳細シート（得意先＝シート名／商品CD・処方番号・単価・要確認・メモ）。
+    商品CDの先頭3桁(得意先番号)で昇順。日付(曜日)はタイトル横に表示。"""
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     cols = DETAIL_COLS
     dated_records = sorted(dated_records, key=lambda dr: _cd_sortkey(dr[1]["商品CD"]))
-    ws.merge_cells("A1:%s1" % ws.cell(row=1, column=len(cols)).column_letter)
+    # タイトル＋出荷日(曜日)を横に
+    ws.merge_cells("A1:C1")
     ws["A1"] = "出荷連絡表（詳細・確認用）"
     ws["A1"].font = Font(name=_FONT, bold=True, size=12)
+    dates = sorted({dl for dl, _ in dated_records if dl})
+    datestr = "、".join("%s（%s）" % (d, _weekday_jp(d)) for d in dates)
+    ws.merge_cells("D1:%s1" % ws.cell(row=1, column=len(cols)).column_letter)
+    ws["D1"] = ("出荷日: " + datestr) if datestr else ""
+    ws["D1"].font = Font(name=_FONT, bold=True)
+    ws["D1"].alignment = Alignment(horizontal="left", vertical="center")
     for j, h in enumerate(cols, 1):
         c = ws.cell(2, j, h); c.font = Font(name=_FONT, bold=True)
         c.alignment = Alignment(horizontal="center", vertical="center"); c.border = border
     i = 3
     for date_label, rec in dated_records:
         vals = {
-            "日付": date_label, "曜日": _weekday_jp(date_label),
+            "得意先": rec.get("得意先", ""),
             "製品名": rec["製品名"], "ロット": rec["ロット"],
             "出荷数": ("" if rec["数量"] is None else _num_out(rec["数量"])),
             "ケース": _cases_str(rec["cases"]),
