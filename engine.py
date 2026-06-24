@@ -452,12 +452,17 @@ def _fuzzy_master_lookup(name, master_index):
     return [], ""
 
 def build_records(agg, master_index):
-    """製品ごとの records を返す（印刷シート・詳細シートの両方の元データ）。原料は除外。"""
+    """製品ごとの records を返す（印刷シート・詳細シートの両方の元データ）。原料は除外。
+    分納は得意先ごとに別行で表示するが、単価判定は『その日の合計数量』(発注数の近似)で行う。"""
+    qty_total = defaultdict(float)  # 製品×ロットの合算数量（単価帯の判定用）
+    for a in agg:
+        qty_total[(normalize(a["製品名"]), a["Lot"])] += (a.get("数量") or 0.0)
     records = []
     for a in sorted(agg, key=lambda x: normalize(x["製品名"])):
         lines = _case_lines(a)
         name_main, yoryo, bulk = _split_name(a["製品名"])
         missing_all = a.get("数量欠落") and a["数量"] == 0  # 数量が全く取れていない
+        price_qty = qty_total[(normalize(a["製品名"]), a["Lot"])] or a["数量"]  # 単価は合計数量で
         note = ""
         if missing_all:
             chosen, flags = None, ["数量が空（要確認）"]
@@ -465,7 +470,7 @@ def build_records(agg, master_index):
             entries = master_index.get(normalize(a["製品名"]), [])
             if not entries:  # 完全一致なし → 末尾サフィックスを外して再検索
                 entries, note = _fuzzy_master_lookup(a["製品名"], master_index)
-            chosen, flags = (None, ["単価リストに該当なし"]) if not entries else select_price(entries, a["数量"])
+            chosen, flags = (None, ["単価リストに該当なし"]) if not entries else select_price(entries, price_qty)
             flags = list(flags)
             if a.get("数量欠落"):
                 flags.append("一部明細で数量が空（要確認）")
