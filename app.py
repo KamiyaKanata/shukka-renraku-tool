@@ -14,16 +14,19 @@ st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
-def _preview_df(records):
-    """records を確認用テーブルに（実際のExcelは『印刷シート＋詳細シート』で出力）。"""
+def _detail_preview_df(groups):
+    """ダウンロードの『詳細シート』と同じ内容のプレビュー（商品CD昇順・曜日・CD0補正）。"""
+    dated = [(g["日付"], r) for g in groups for r in g["records"]]
+    dated = sorted(dated, key=lambda dr: engine._cd_sortkey(dr[1]["商品CD"]))
     rows = [{
+        "日付": dl, "曜日": engine._weekday_jp(dl),
         "製品名": r["製品名"], "ロット": r["ロット"],
         "出荷数": ("" if r["数量"] is None else engine._num_out(r["数量"])),
         "ケース": engine._cases_str(r["cases"]),
-        "商品CD": r["商品CD"], "処方番号": r["処方番号"],
+        "商品CD": engine._pad_cd(r["商品CD"]), "処方番号": r["処方番号"],
         "単価": ("" if r["単価"] is None else r["単価"]),
         "要確認": ("要確認" if r["要確認"] else ""), "メモ": r["メモ"],
-    } for r in records]
+    } for dl, r in dated]
     return pd.DataFrame(rows) if rows else pd.DataFrame({"(なし)": []})
 
 
@@ -56,7 +59,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v2.9（詳細：曜日列＋商品CDを先頭3桁で昇順・0補正）"
+APP_VERSION = "v2.9.1（プレビューを詳細シートと一致）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
@@ -120,12 +123,9 @@ if go and kari and master:
     summary = f"{len(dates)}シート / {stats['出荷連絡表 行数']}行 / 要確認{stats['要確認 行数']}"
     _push_history(fname, bio.getvalue(), summary)
 
-    # プレビュー（日付ごと）※実際のExcelは実物フォーマットの印刷シート＋詳細シート
-    st.markdown("#### 内容プレビュー（ダウンロードは実物フォーマットの印刷シート＋詳細シートで出力）")
-    for g in groups:
-        if len(groups) > 1:
-            st.markdown(f"**🗓 {g['日付']}**（{len(g['records'])}製品）")
-        st.table(_preview_df(g["records"]).style.hide(axis="index"))
+    # プレビュー＝ダウンロードの「詳細シート」と同じ内容。印刷用シートはダウンロードにのみ入る。
+    st.markdown("#### 内容プレビュー（＝詳細シートと同じ。ダウンロードには別途『印刷用シート（実物フォーマット）』も入ります）")
+    st.table(_detail_preview_df(groups).style.hide(axis="index"))
 
     with st.expander(f"🔍 解析の内訳（読めた明細 {len(debug['items'])} 件 / 除外 {len(debug['excluded'])} 件）— 「商品が乗らない」原因の確認用"):
         if debug.get("per_file"):
