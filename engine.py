@@ -362,7 +362,8 @@ def aggregate(items):
     """製品×ロットで数量を合算。ケースは入数ごとに箱数を合算（例 50×10 + 50×1×3 -> 50×13）。"""
     agg = {}
     for it in items:
-        key = (normalize(it["製品名"]), it["Lot"])
+        # 分納は得意先（仮納品書のシート）ごとに分ける → キーに得意先を含める
+        key = (it.get("シート", ""), normalize(it["製品名"]), it["Lot"])
         if key not in agg:
             agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0,
                         "cases": defaultdict(float), "数量欠落": False,
