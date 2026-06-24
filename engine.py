@@ -379,7 +379,30 @@ def aggregate(items):
     return list(agg.values())
 
 # 詳細シートの列（メインの印刷シートとは別。金額は出さない）
-DETAIL_COLS = ["日付", "製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
+DETAIL_COLS = ["日付", "曜日", "製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
+
+_WD_JP = "月火水木金土日"
+def _weekday_jp(date_str):
+    """ISO日付文字列から日本語曜日（例 2026-06-24 -> 水）。"""
+    try:
+        return _WD_JP[datetime.date.fromisoformat(str(date_str)).weekday()]
+    except Exception:
+        return ""
+
+def _pad_cd(cd):
+    """商品CDの先頭0が落ちた6桁を復元（例 59947 -> 059947）。それ以外は原型のまま。"""
+    s = str(cd or "").strip()
+    if s.isdigit() and len(s) == 5 and not s.startswith("0"):
+        return "0" + s
+    return s
+
+def _cd_sortkey(cd):
+    """商品CDの先頭3桁(数値)で昇順。CDなし/数字始まりでないものは末尾へ。"""
+    s = _pad_cd(cd)
+    m = re.match(r"\d{1,3}", s)
+    if not m:
+        return (9999, "")
+    return (int(m.group(0)[:3]), s)
 
 def _num_out(q):
     """整数ならint、小数あり（バルクのkg等）ならそのまま小数で返す。"""
@@ -557,14 +580,16 @@ def _write_print_sheet(ws, records, date_label):
         r += nrows
     ws.print_area = "A1:G%d" % max(r - 1, 5)
 
-_DETAIL_W = {"日付": 11, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
+_DETAIL_W = {"日付": 11, "曜日": 5, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
              "商品CD": 11, "処方番号": 16, "単価": 9, "要確認": 8, "メモ": 40}
 
 def _write_detail_sheet(ws, dated_records):
-    """確認用の詳細シート（商品CD・処方番号・単価・要確認・メモを含む）。"""
+    """確認用の詳細シート（商品CD・処方番号・単価・要確認・メモを含む）。
+    商品CDの先頭3桁(得意先番号)で昇順に並べ、先頭0が落ちたCDは復元する。"""
     thin = Side(style="thin", color="BFBFBF")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
     cols = DETAIL_COLS
+    dated_records = sorted(dated_records, key=lambda dr: _cd_sortkey(dr[1]["商品CD"]))
     ws.merge_cells("A1:%s1" % ws.cell(row=1, column=len(cols)).column_letter)
     ws["A1"] = "出荷連絡表（詳細・確認用）"
     ws["A1"].font = Font(name=_FONT, bold=True, size=12)
@@ -574,10 +599,11 @@ def _write_detail_sheet(ws, dated_records):
     i = 3
     for date_label, rec in dated_records:
         vals = {
-            "日付": date_label, "製品名": rec["製品名"], "ロット": rec["ロット"],
+            "日付": date_label, "曜日": _weekday_jp(date_label),
+            "製品名": rec["製品名"], "ロット": rec["ロット"],
             "出荷数": ("" if rec["数量"] is None else _num_out(rec["数量"])),
             "ケース": _cases_str(rec["cases"]),
-            "商品CD": rec["商品CD"], "処方番号": rec["処方番号"], "単価": rec["単価"],
+            "商品CD": _pad_cd(rec["商品CD"]), "処方番号": rec["処方番号"], "単価": rec["単価"],
             "要確認": ("要確認" if rec["要確認"] else ""), "メモ": rec["メモ"],
         }
         for j, k in enumerate(cols, 1):
@@ -585,6 +611,9 @@ def _write_detail_sheet(ws, dated_records):
             if k in ("単価", "出荷数"):
                 c.number_format = "#,##0.###"
                 c.alignment = Alignment(horizontal="right", vertical="top")
+            elif k in ("曜日", "商品CD"):
+                c.number_format = "@"  # 商品CDは文字列扱い（先頭0を保持）
+                c.alignment = Alignment(horizontal="center" if k == "曜日" else "left", vertical="top")
             else:
                 c.alignment = Alignment(wrap_text=True, vertical="top")
         i += 1
