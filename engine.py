@@ -155,12 +155,15 @@ def load_master(fileobj, filename):
             if name is None or not str(name).strip():
                 continue
             tanka = first_num(row[cp]) if cp < len(row) else None
-            if tanka is None:
+            cd_val = str(row[cc]).strip() if (cc is not None and cc < len(row) and row[cc] is not None) else ""
+            sk_val = str(row[cs]).strip() if (cs is not None and cs < len(row) and row[cs] is not None) else ""
+            # 単価が空でも、商品CDか処方番号があれば実商品として残す（輸出品等）。
+            if tanka is None and not (cd_val or sk_val):
                 continue
             entry = {
                 "製品名": str(name).strip(),
-                "商品CD": str(row[cc]).strip() if (cc is not None and cc < len(row) and row[cc] is not None) else "",
-                "試作番号": str(row[cs]).strip() if (cs is not None and cs < len(row) and row[cs] is not None) else "",
+                "商品CD": cd_val,
+                "試作番号": sk_val,
                 "単価": tanka,
                 "価格更新": parse_date(row[cu]) if (cu is not None and cu < len(row)) else None,
                 "ロット下限": first_num(row[cl]) if (cl is not None and cl < len(row)) else None,
@@ -175,7 +178,8 @@ def select_price(entries, qty):
     flags = []
     es = [e for e in entries if e["単価"] is not None]
     if not es:
-        return None, ["単価が空"]
+        # 単価なし（輸出品等）でも、商品CD・処方番号は出せるよう先頭エントリを返す
+        return (entries[0] if entries else None), ["単価が空（輸出品等で単価なし）"]
     thresholds = sorted({e["ロット下限"] for e in es if e["ロット下限"] is not None})
     if thresholds:
         le = [t for t in thresholds if t <= qty]
@@ -338,26 +342,25 @@ def parse_karinouhin(fileobj):
 
 # ================= 集計・突合 =================
 def parse_case_terms(text):
-    """備考のケース構成を (入数, 箱数) のリストへ。
-    例 '300×3c/s、100×1c/s' -> [(300,3),(100,1)] / '1c/s'(バルク) -> [(None,1)]"""
+    """備考のケース構成を (入数, 箱数) のリストへ。入数は文字列（タル/20kg/60等もそのまま）。
+    例 '20kg×2、10kg×1' -> [('20kg',2),('10kg',1)] / 'タル×2' -> [('タル',2)] / '1c/s' -> [('',1)]"""
     if not text:
         return []
-    t = unicodedata.normalize("NFKC", str(text))
+    t = unicodedata.normalize("NFKC", str(text))  # ㎏→kg、全角×/c/s→半角に統一
     pairs = []
-    def _take(m):
+    # 「入数×箱数」：入数は数字以外(タル)や単位付き(20kg)も許可。箱数は数字。
+    for m in re.finditer(r"([^\s×x*、,]+)\s*[×x*]\s*(\d[\d,]*)", t):
         try:
-            pairs.append((float(m.group(1).replace(",", "")), float(m.group(2).replace(",", ""))))
+            pairs.append((m.group(1).strip(), float(m.group(2).replace(",", ""))))
         except ValueError:
             pass
-        return " "
-    # 「入数×箱数」を先に拾って消す
-    t2 = re.sub(r"(\d[\d,]*)\s*[x×*]\s*(\d[\d,]*)", _take, t)
-    # 残った「N c/s」(×なし＝バルク等)は 入数なし×箱数
-    for m in re.finditer(r"(\d[\d,]*)\s*[cＣ]\s*[/／]\s*[sＳ]", t2):
-        try:
-            pairs.append((None, float(m.group(1).replace(",", ""))))
-        except ValueError:
-            pass
+    # ×が無い「N c/s」(バルク1容器など)は 入数なし×箱数
+    if not pairs:
+        for m in re.finditer(r"(\d[\d,]*)\s*c\s*/\s*s", t, re.I):
+            try:
+                pairs.append(("", float(m.group(1).replace(",", ""))))
+            except ValueError:
+                pass
     return pairs
 
 def aggregate(items):
@@ -384,7 +387,7 @@ def aggregate(items):
 
 # 詳細シートの列（メインの印刷シートとは別。金額は出さない）。先頭は得意先＝仮納品書シート名。
 # 日付・曜日は列にせず、タイトル横に表示する。
-DETAIL_COLS = ["得意先", "製品名", "ロット", "出荷数", "ケース", "商品CD", "処方番号", "単価", "要確認", "メモ"]
+DETAIL_COLS = ["得意先", "製品名", "ロット", "出荷数", "単価", "ケース", "商品CD", "処方番号", "要確認", "メモ"]
 
 _WD_JP = "月火水木金土日"
 def _weekday_jp(date_str):
@@ -415,12 +418,15 @@ def _num_out(q):
     return int(q) if q.is_integer() else round(q, 3)
 
 def _case_lines(a):
-    """入数の降順で (入数 or None, 箱数) のリスト。バルクは入数None。"""
-    return [(n, h) for n, h in sorted(a["cases"].items(), key=lambda kv: -(kv[0] or 0)) if h]
+    """(入数文字列, 箱数) のリスト。数字入数は値の降順、文字入数(タル等)はその後。"""
+    def _k(kv):
+        m = re.match(r"\d[\d,]*", kv[0] or "")
+        return (0, -float(m.group(0).replace(",", ""))) if m else (1, kv[0] or "")
+    return [(n, h) for n, h in sorted(a["cases"].items(), key=_k) if h]
 
 def _cases_str(lines):
-    """詳細表示用の文字列。例 [(12,16),(8,1)] -> '12×16、8×1' / [(None,1)] -> '1c/s'"""
-    return "、".join(("%d×%d" % (int(n), int(h)) if n else "%dc/s" % int(h)) for n, h in lines)
+    """詳細表示用の文字列。例 [('12',16),('8',1)] -> '12×16、8×1' / [('20kg',2)] -> '20kg×2' / [('',1)] -> '1c/s'"""
+    return "、".join(("%s×%d" % (n, int(h)) if n else "%dc/s" % int(h)) for n, h in lines)
 
 # 製品名末尾の容量（10ml/980g/150ｍL 等）を分離。全角/半角の混在に対応した文字クラス。
 _YORYO_UNIT = (r"(?:[mｍＭ][lLｌＬ]|[kＫｋ][gＧｇ]|㎏|㎖|[gＧｇ]|[lLｌＬℓ]|[cＣ][cＣ]|個|本|錠|包|枚)")
@@ -510,11 +516,11 @@ def _safe_sheet_title(label, used):
     return t
 
 def _qty_disp(rec):
-    """出荷数の表示。バルクは『22㎏』、それ以外は数量、空はブランク。"""
+    """出荷数の表示。バルクは『22kg』、それ以外は数量、空はブランク。"""
     if rec["数量"] is None:
         return ""
     v = _num_out(rec["数量"])
-    return ("%s㎏" % v) if rec["bulk"] else v
+    return ("%skg" % v) if rec["bulk"] else v
 
 # 実物テンプレ（事務所→工場）に合わせた列幅
 _PRINT_W = {"A": 39.1, "B": 13.9, "C": 15.8, "D": 7.9, "E": 5.4, "F": 7.9, "G": 6.7}
@@ -572,7 +578,7 @@ def _write_print_sheet(ws, records, date_label):
             if i < len(rec["cases"]):
                 nyu, hako = rec["cases"][i]
                 if nyu:
-                    ws.cell(rr, 4, int(nyu)).alignment = rgt
+                    ws.cell(rr, 4, int(nyu) if str(nyu).isdigit() else nyu).alignment = rgt
                 ws.cell(rr, 6, int(hako)).alignment = rgt
         # 罫線（実物同様）：製品ごとに外枠は実線。A列の名前↔容量の内部横線は無し、
         # ケース列(D-G)の内部横線は点線。左右は実線グリッド。
@@ -621,7 +627,7 @@ def _write_detail_sheet(ws, dated_records):
         vals = {
             "得意先": rec.get("得意先", ""),
             "製品名": rec["製品名"], "ロット": rec["ロット"],
-            "出荷数": ("" if rec["数量"] is None else _num_out(rec["数量"])),
+            "出荷数": _qty_disp(rec),  # バルクは kg 付き
             "ケース": _cases_str(rec["cases"]),
             "商品CD": _pad_cd(rec["商品CD"]), "処方番号": rec["処方番号"], "単価": rec["単価"],
             "要確認": ("要確認" if rec["要確認"] else ""), "メモ": rec["メモ"],

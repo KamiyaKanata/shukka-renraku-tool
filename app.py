@@ -21,10 +21,10 @@ def _detail_preview_df(groups):
     rows = [{
         "得意先": r.get("得意先", ""),
         "製品名": r["製品名"], "ロット": r["ロット"],
-        "出荷数": ("" if r["数量"] is None else engine._num_out(r["数量"])),
+        "出荷数": engine._qty_disp(r),
+        "単価": ("" if r["単価"] is None else r["単価"]),
         "ケース": engine._cases_str(r["cases"]),
         "商品CD": engine._pad_cd(r["商品CD"]), "処方番号": r["処方番号"],
-        "単価": ("" if r["単価"] is None else r["単価"]),
         "要確認": ("要確認" if r["要確認"] else ""), "メモ": r["メモ"],
     } for dl, r in dated]
     return pd.DataFrame(rows) if rows else pd.DataFrame({"(なし)": []})
@@ -59,7 +59,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v3.3（処方番号の見出し表記ゆれに対応）"
+APP_VERSION = "v3.4（バルクケース表記・kg統一・単価E列・単価空の商品も表示）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
