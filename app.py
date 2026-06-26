@@ -59,7 +59,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v3.4（バルクケース表記・kg統一・単価E列・単価空の商品も表示）"
+APP_VERSION = "v3.5（処方番号の見出しに試作No.等を追加対応）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
