@@ -389,7 +389,7 @@ def aggregate(items):
 
 # 詳細シートの列（メインの印刷シートとは別。金額は出さない）。先頭は得意先＝仮納品書シート名。
 # 日付・曜日は列にせず、タイトル横に表示する。
-DETAIL_COLS = ["得意先", "製品名", "ロット", "出荷数", "単価", "ケース", "商品CD", "処方番号", "要確認", "メモ"]
+DETAIL_COLS = ["得意先", "製品名", "ロット", "出荷数", "単価", "ケース", "商品CD", "試作番号", "要確認", "メモ"]
 
 _WD_JP = "月火水木金土日"
 def _weekday_jp(date_str):
@@ -493,7 +493,7 @@ def build_records(agg, master_index):
             "数量": (None if missing_all else a["数量"]),
             "cases": lines,
             "商品CD": chosen["商品CD"] if chosen else "",
-            "処方番号": chosen["試作番号"] if chosen else "",
+            "試作番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
             "要確認": bool(flags),
             "メモ": " / ".join([x for x in flags + ([note] if note else []) if x]),
@@ -602,7 +602,7 @@ def _write_print_sheet(ws, records, date_label):
     ws.print_area = "A1:G%d" % max(r - 1, 5)
 
 _DETAIL_W = {"得意先": 20, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
-             "商品CD": 11, "処方番号": 16, "単価": 9, "要確認": 8, "メモ": 40}
+             "商品CD": 11, "試作番号": 16, "単価": 9, "要確認": 8, "メモ": 40}
 
 def _write_detail_sheet(ws, dated_records):
     """確認用の詳細シート（得意先＝シート名／商品CD・処方番号・単価・要確認・メモ）。
@@ -631,7 +631,7 @@ def _write_detail_sheet(ws, dated_records):
             "製品名": rec["製品名"], "ロット": rec["ロット"],
             "出荷数": _qty_disp(rec),  # バルクは kg 付き
             "ケース": _cases_str(rec["cases"]),
-            "商品CD": _pad_cd(rec["商品CD"]), "処方番号": rec["処方番号"], "単価": rec["単価"],
+            "商品CD": _pad_cd(rec["商品CD"]), "試作番号": rec["試作番号"], "単価": rec["単価"],
             "要確認": ("要確認" if rec["要確認"] else ""), "メモ": rec["メモ"],
         }
         for j, k in enumerate(cols, 1):
