@@ -524,6 +524,13 @@ def _qty_disp(rec):
     v = _num_out(rec["数量"])
     return ("%skg" % v) if rec["bulk"] else v
 
+def detail_name(rec):
+    """詳細シートの製品名セル。バルクは2行目に『〇〇へバルク出荷』(配送先)を付ける。"""
+    if rec.get("bulk"):
+        d = _clean_dest(rec.get("発送先", ""))
+        return rec.get("name_main", rec["製品名"]) + ("\n%sへバルク出荷" % d if d else "\nバルク出荷")
+    return rec["製品名"]
+
 # 実物テンプレ（事務所→工場）に合わせた列幅
 _PRINT_W = {"A": 39.1, "B": 13.9, "C": 15.8, "D": 7.9, "E": 5.4, "F": 7.9, "G": 6.7}
 
@@ -628,7 +635,7 @@ def _write_detail_sheet(ws, dated_records):
     for date_label, rec in dated_records:
         vals = {
             "得意先": rec.get("得意先", ""),
-            "製品名": rec["製品名"], "ロット": rec["ロット"],
+            "製品名": detail_name(rec), "ロット": rec["ロット"],
             "出荷数": _qty_disp(rec),  # バルクは kg 付き
             "ケース": _cases_str(rec["cases"]),
             "商品CD": _pad_cd(rec["商品CD"]), "試作番号": rec["試作番号"], "単価": rec["単価"],

@@ -20,7 +20,7 @@ def _detail_preview_df(groups):
     dated = sorted(dated, key=lambda dr: engine._cd_sortkey(dr[1]["商品CD"]))
     rows = [{
         "得意先": r.get("得意先", ""),
-        "製品名": r["製品名"], "ロット": r["ロット"],
+        "製品名": engine.detail_name(r), "ロット": r["ロット"],
         "出荷数": engine._qty_disp(r),
         "単価": ("" if r["単価"] is None else r["単価"]),
         "ケース": engine._cases_str(r["cases"]),
@@ -59,7 +59,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v3.7（詳細の列名を試作番号に変更）"
+APP_VERSION = "v3.8（詳細シートのバルクにも〇〇へバルク出荷を表示）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 
