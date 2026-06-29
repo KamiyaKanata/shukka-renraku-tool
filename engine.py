@@ -560,14 +560,11 @@ def _write_print_sheet(ws, records, date_label):
     ws["C1"].font = Font(name=_FONT); ws["C1"].alignment = cen
     ws["D1"] = "（%s）" % _weekday_jp(date_label)  # 日付の右に曜日
     ws["D1"].font = Font(name=_FONT); ws["D1"].alignment = Alignment(horizontal="left", vertical="center")
-    ws.merge_cells("A3:G3")
-    ws["A3"] = "事務所（ＦＡＸ06-6453-3916）ｏｒ　honsha@sunbloom-cosme.co.jp　⇒工　場"
-    ws["A3"].font = Font(name=_FONT); ws["A3"].alignment = cen
     for col, h in zip("ABCD", ["製品名", "ロット", "出荷数", "ケース数"]):
-        c = ws["%s5" % col]; c.value = h
+        c = ws["%s3" % col]; c.value = h
         c.font = Font(name=_FONT, bold=True); c.alignment = cen; c.border = border
     # 明細（1製品2行以上）
-    r = 6
+    r = 4
     for rec in records:
         nrows = max(2, len(rec["cases"]))
         nm = rec["name_main"] + ("　【要確認】" if rec["要確認"] else "")
