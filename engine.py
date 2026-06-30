@@ -319,9 +319,13 @@ def parse_karinouhin(fileobj):
                                  "除外理由": "残資材/支給ブロック(開始)", "シート": ws.title, "日付": sd_str})
                 continue
             if zanzai:
-                excluded.append({"製品名": raw.strip(), "数量": qcell,
-                                 "除外理由": "残資材/支給ブロック", "シート": ws.title, "日付": sd_str})
-                continue
+                lot_here = row[lcol] if (lcol is not None and lcol < len(row)) else None
+                if lot_here and str(lot_here).strip():
+                    zanzai = False  # ロットがある＝実商品。残資材ブロックを抜けて通常処理へ
+                else:
+                    excluded.append({"製品名": raw.strip(), "数量": qcell,
+                                     "除外理由": "残資材/支給ブロック", "シート": ws.title, "日付": sd_str})
+                    continue
             qty = first_num(qcell)
             lot = row[lcol] if (lcol is not None and lcol < len(row)) else None
             bikou = row[bcol] if (bcol is not None and bcol < len(row)) else None
@@ -365,12 +369,14 @@ def parse_case_terms(text):
                 pass
     return pairs
 
-def aggregate(items):
-    """製品×ロットで数量を合算。ケースは入数ごとに箱数を合算（例 50×10 + 50×1×3 -> 50×13）。"""
+def aggregate(items, by_sheet=True):
+    """製品×ロットで数量を合算。ケースは入数ごとに箱数を合算。
+    by_sheet=True: 得意先(シート)ごとに分ける／False: 発送先に関わらず同一商品を合算。"""
     agg = {}
     for it in items:
-        # 分納は得意先（仮納品書のシート）ごとに分ける → キーに得意先を含める
-        key = (it.get("シート", ""), normalize(it["製品名"]), it["Lot"])
+        # by_sheet=True: 得意先(シート)ごとに分ける／False: 同一商品を発送先に関わらず合算
+        sheet_key = it.get("シート", "") if by_sheet else ""
+        key = (sheet_key, normalize(it["製品名"]), it["Lot"])
         if key not in agg:
             agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0,
                         "cases": defaultdict(float), "数量欠落": False,
@@ -659,7 +665,7 @@ def to_workbook(groups, *_ignore, **_kw):
     used = set()
     for g in groups:
         ws = wb.create_sheet(_safe_sheet_title(g["日付"], used))
-        _write_print_sheet(ws, g.get("records", []), g["日付"])
+        _write_print_sheet(ws, g.get("print_records", g.get("records", [])), g["日付"])
     dws = wb.create_sheet(_safe_sheet_title("詳細", used))
     _write_detail_sheet(dws, [(g["日付"], r) for g in groups for r in g.get("records", [])])
     if not wb.worksheets:
@@ -699,13 +705,14 @@ def generate(karinouhin_fileobjs, master_fileobj, master_filename, date_label=""
             groups_map[d.isoformat() if d else today].append(it)
     groups = []
     for label in sorted(groups_map.keys()):
-        recs = build_records(aggregate(groups_map[label]), master_index)
-        groups.append({"日付": label, "records": recs,
+        recs = build_records(aggregate(groups_map[label], by_sheet=True), master_index)   # 詳細＝得意先ごと
+        precs = build_records(aggregate(groups_map[label], by_sheet=False), master_index)  # メイン＝合算
+        groups.append({"日付": label, "records": recs, "print_records": precs,
                        "明細数": len(groups_map[label]),
                        "要確認": sum(1 for r in recs if r["要確認"])})
     if not groups:  # 明細ゼロでも空の1シートは作る
         groups.append({"日付": override or (overall.isoformat() if overall else today),
-                       "records": [], "明細数": 0, "要確認": 0})
+                       "records": [], "print_records": [], "明細数": 0, "要確認": 0})
     stats = {
         "マスタ商品数": n,
         "仮納品書 明細数(資材除外後)": len(items),
