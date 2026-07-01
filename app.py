@@ -59,7 +59,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v4.1（バルク発送先が2行でも御中まで連結）"
+APP_VERSION = "v4.2（バルク宛先の2行目・御中なしでも連結）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
 

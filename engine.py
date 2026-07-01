@@ -246,12 +246,12 @@ def _clean_dest(s):
     return s.replace("御中", "").strip("　 ").strip()
 
 def _find_dest(rows, hidx, pcol):
-    """ヘッダー前の行から発送先（宛先）を推定。会社名の行から『御中/様』の行まで連結する
-    （例：ウェーブコーポレーション＋静岡工場御中 → ウェーブコーポレーション静岡工場）。
-    御中/様が無ければ先頭の会社名1行のみ。"""
-    lines, stopped = [], False
+    """ヘッダー前の行から発送先（宛先）を推定。会社名の行から、御中/様の行、または
+    自社(サンブルーム等)の行の手前まで連結する。御中が無く2行に分かれても拾える。
+    例：ウェーブコーポレーション＋静岡工場御中 → ウェーブコーポレーション静岡工場。"""
+    lines = []
     for row in rows[1:min(hidx, 9)]:
-        parts, stop = [], False
+        texts, has_gochu, has_skip = [], False, False
         for c in row:
             if c in (None, "") or isinstance(c, (datetime.date, datetime.datetime, int, float)):
                 continue
@@ -261,17 +261,19 @@ def _find_dest(rows, hidx, pcol):
             if not s:
                 continue
             if ("御中" in s) or ("様" in s):
-                stop = True                       # 御中/様の行で宛先は終わり（御中は後で除去、様は残す）
+                has_gochu = True; texts.append(s)      # 御中/様の行までは宛先（御中は後で除去）
             elif any(k in normalize(s) for k in _DEST_SKIP_NORM):
-                continue                          # 自社・見出し等は飛ばす
-            parts.append(s)
-        if parts:
-            lines.append("".join(parts))
-        if stop:
-            stopped = True
+                has_skip = True                        # 自社・見出し・日付など
+            else:
+                texts.append(s)
+        if has_skip and not texts:                     # 自社(サンブルーム等)/見出し行
+            if lines:
+                break                                  # 宛先を拾った後 → shipper。終了
+            continue                                   # まだなら上部の仮納品書/日付行。飛ばす
+        if texts:
+            lines.append("".join(texts))
+        if has_gochu:
             break
-    if not stopped:                               # 御中/様が無い場合は先頭行のみ（従来動作）
-        return lines[0] if lines else ""
     return "".join(lines)
 
 def parse_karinouhin(fileobj):
