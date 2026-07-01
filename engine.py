@@ -235,8 +235,9 @@ def _is_red_font(cell):
         return True
     return False
 
-_DEST_SKIP = ("仮納品書", "受領書", "日付", "御中", "下記", "サンブルーム", "大阪市",
-              "工場", "品名", "数量", "合計", "ご担当", "申し上げ", "No.")
+# 宛先行から除外する語（自社/日付/納品書見出し等）。※「工場」は宛先の『静岡工場』を消さないよう入れない
+_DEST_SKIP = ("仮納品書", "受領書", "日付", "下記", "サンブルーム", "大阪市",
+              "品名", "数量", "合計", "ご担当", "申し上げ", "No.")
 _DEST_SKIP_NORM = tuple(normalize(x) for x in _DEST_SKIP)
 def _clean_dest(s):
     """発送先名から法人格・御中等を除く。例『株式会社ゼロ・インフィニティ』→『ゼロ・インフィニティ』"""
@@ -245,20 +246,33 @@ def _clean_dest(s):
     return s.replace("御中", "").strip("　 ").strip()
 
 def _find_dest(rows, hidx, pcol):
-    """ヘッダー前の行から発送先（宛先）を推定。先頭側の会社名らしい1件を返す。"""
-    for row in rows[1:hidx]:
+    """ヘッダー前の行から発送先（宛先）を推定。会社名の行から『御中/様』の行まで連結する
+    （例：ウェーブコーポレーション＋静岡工場御中 → ウェーブコーポレーション静岡工場）。
+    御中/様が無ければ先頭の会社名1行のみ。"""
+    lines, stopped = [], False
+    for row in rows[1:min(hidx, 9)]:
+        parts, stop = [], False
         for c in row:
             if c in (None, "") or isinstance(c, (datetime.date, datetime.datetime, int, float)):
                 continue
-            if parse_date(c):       # 日付っぽいセルは除外
+            if parse_date(c):
                 continue
             s = str(c).strip()
-            sn = normalize(s)       # 全角スペース除去後で判定（"仮　納　品　書"対策）
-            if not sn or any(k in sn for k in _DEST_SKIP_NORM):
+            if not s:
                 continue
-            if len(sn) >= 3:
-                return s
-    return ""
+            if ("御中" in s) or ("様" in s):
+                stop = True                       # 御中/様の行で宛先は終わり（御中は後で除去、様は残す）
+            elif any(k in normalize(s) for k in _DEST_SKIP_NORM):
+                continue                          # 自社・見出し等は飛ばす
+            parts.append(s)
+        if parts:
+            lines.append("".join(parts))
+        if stop:
+            stopped = True
+            break
+    if not stopped:                               # 御中/様が無い場合は先頭行のみ（従来動作）
+        return lines[0] if lines else ""
+    return "".join(lines)
 
 def parse_karinouhin(fileobj):
     """仮納品書を解析。最初の「品名&数量」ブロックのみを読み、最初の「合計」で停止
