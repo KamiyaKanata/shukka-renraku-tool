@@ -175,6 +175,50 @@ def load_master(fileobj, filename):
             n_entries += 1
     return index, n_entries
 
+def load_master_from_rows(values):
+    """ロット別単価マスタ（GAS等からの2次元配列。先頭行が見出し）から索引を作る。
+    列: 販売名→製品名／売上単価→単価／単価更新→価格更新／ロット数値→ロット下限／
+        商品コード→商品CD／処方番号→試作番号。"""
+    if not values:
+        return {}, 0
+    hdr = [normalize(h) for h in values[0]]
+    def col(*names):
+        for j, h in enumerate(hdr):
+            if h and any(n in h for n in names):
+                return j
+        return None
+    cn = col("販売名", "製品名")
+    cv = col("容量")               # 仮納品書名は「販売名＋容量」なので結合してキーにする
+    cc = col("商品コード", "商品cd")
+    cs = col("処方番号", "試作番号", "初法番号")
+    cp = col("売上単価")            # 「売上単価」を先に拾う（「売上単価/税込」より前）
+    cu = col("単価更新", "価格更新")
+    cl = col("ロット数値")          # 数量帯の下限
+    if cn is None or cp is None:
+        return {}, 0
+    index, n = {}, 0
+    for row in values[1:]:
+        if cn >= len(row):
+            continue
+        name = row[cn]
+        if name is None or not str(name).strip():
+            continue
+        yoryo = str(row[cv]).strip() if (cv is not None and cv < len(row) and row[cv] not in (None, "")) else ""
+        full = (str(name).strip() + yoryo)   # 販売名＋容量（例: シエンシャンプー+600mL）
+        tanka = first_num(row[cp]) if cp < len(row) else None
+        cd = str(row[cc]).strip() if (cc is not None and cc < len(row) and row[cc] not in (None, "")) else ""
+        sk = str(row[cs]).strip() if (cs is not None and cs < len(row) and row[cs] not in (None, "")) else ""
+        if tanka is None and not (cd or sk):
+            continue
+        index.setdefault(normalize(full), []).append({
+            "製品名": full, "商品CD": cd, "試作番号": sk, "単価": tanka,
+            "価格更新": parse_date(row[cu]) if (cu is not None and cu < len(row)) else None,
+            "ロット下限": first_num(row[cl]) if (cl is not None and cl < len(row)) else None,
+            "シート": "ロット別単価マスタ",
+        })
+        n += 1
+    return index, n
+
 # ================= 単価選択 =================
 def select_price(entries, qty):
     flags = []
@@ -193,6 +237,8 @@ def select_price(entries, qty):
         cands = [e for e in es if e["ロット下限"] == chosen_t]
     else:
         cands = es
+        if len({e["単価"] for e in es}) > 1:   # 数量帯なしで複数単価 → 区別不能
+            flags.append("複数単価だが数量帯(ロット数値)なし→要確認")
     cds = {e["商品CD"] for e in cands if e["商品CD"]}
     if len(cds) > 1:
         flags.append("商品CD複数 %s →名前衝突(要確認)" % sorted(cds))
@@ -690,15 +736,13 @@ def to_workbook(groups, *_ignore, **_kw):
     return bio
 
 # ================= 一括処理 =================
-def generate(karinouhin_fileobjs, master_fileobj, master_filename, date_label=""):
-    """複数の仮納品書（各々が複数シートでも可）を受け取り、出荷日ごとにグルーピングして
-    「1日付＝1シート」の出荷連絡表グループ群を返す。
-    返り値: (groups, stats, debug)
-      groups = [ {"日付": "2026-06-19", "rows": [...], "colorder": [...], "明細数": n, "要確認": n}, ... ]
-    """
+def generate(karinouhin_fileobjs, master_index, master_count=0, date_label=""):
+    """複数の仮納品書を受け取り、出荷日ごとにグルーピングして出荷連絡表グループ群を返す。
+    master_index は事前構築済みの単価索引（load_master_from_rows / load_master の返り値の索引）。
+    返り値: (groups, stats, debug)"""
     if not isinstance(karinouhin_fileobjs, (list, tuple)):
         karinouhin_fileobjs = [karinouhin_fileobjs]
-    master_index, n = load_master(master_fileobj, master_filename)
+    n = master_count
     items, excluded, per_file = [], [], []
     for f in karinouhin_fileobjs:
         it, ex, kd = parse_karinouhin(f)
@@ -752,8 +796,13 @@ if __name__ == "__main__":
     master = args.pop()
     karis = args
     kfs = [open(k, "rb") for k in karis]
-    with open(master, "rb") as mf:
-        groups, stats, debug = generate(kfs, mf, master)
+    if master.lower().endswith(".json"):        # GAS JSON（ロット別単価マスタ）
+        import json
+        midx, mn = load_master_from_rows(json.load(open(master))["values"])
+    else:                                       # 従来の .xlsm/.xlsx/.csv
+        with open(master, "rb") as mf:
+            midx, mn = load_master(mf, master)
+    groups, stats, debug = generate(kfs, midx, mn)
     for f in kfs:
         f.close()
     print("マスタ商品数:", stats["マスタ商品数"], "/ 明細:", stats["仮納品書 明細数(資材除外後)"],

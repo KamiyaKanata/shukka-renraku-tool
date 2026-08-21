@@ -14,6 +14,20 @@ st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def _fetch_master():
+    """商品マスタ（ロット別単価マスタ）をGAS Web App経由で取得し、単価索引を返す。30分キャッシュ。"""
+    import requests
+    url = st.secrets["MASTER_GAS_URL"]
+    token = st.secrets["MASTER_GAS_TOKEN"]
+    r = requests.get(url, params={"token": token}, timeout=90)
+    r.raise_for_status()
+    data = r.json()
+    if isinstance(data, dict) and data.get("error"):
+        raise RuntimeError("マスタAPIエラー: %s（トークン不一致など）" % data["error"])
+    return engine.load_master_from_rows(data["values"])
+
+
 def _detail_preview_df(groups):
     """ダウンロードの『詳細シート』と同じ内容（得意先＝シート名／商品CD昇順／CD0補正）。"""
     dated = [(g["日付"], r) for g in groups for r in g["records"]]
@@ -59,17 +73,16 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v4.2（バルク宛先の2行目・御中なしでも連結）"
+APP_VERSION = "v5.0（単価をロット別単価マスタからGAS経由で自動取得・マスタUP不要）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
-st.caption(f"仮納品書と商品マスタをアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。｜{APP_VERSION}")
+st.caption(f"仮納品書をアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。単価は商品マスタから自動取得。｜{APP_VERSION}")
 
 with st.sidebar:
     st.header("使い方")
     st.markdown(
         "1. **仮納品書**（Excel）をアップロード（**複数選択可**）\n"
-        "2. **商品マスタ**（商品単価リスト .xlsm / .xlsx / .csv）をアップロード\n"
-        "3. **生成**ボタンを押す\n"
-        "4. 表を確認して **ダウンロード**\n\n"
+        "2. **生成**ボタンを押す（単価は商品マスタから自動取得・アップロード不要）\n"
+        "3. 表を確認して **ダウンロード**\n\n"
         "・複数ファイル／複数シートは **出荷日ごとに別シート**で1つのExcelにまとめます\n"
         "・同一日付の中は製品×ロットで合算します\n"
         "・資材／残資材は自動で除外、有償サンプルは含めます\n"
@@ -81,19 +94,22 @@ with st.sidebar:
     date_label = st.text_input("出荷日（空欄なら仮納品書から自動取得）", value="",
                                help="例: 2026-06-08。空欄のままなら仮納品書の日付を自動で使います。")
 
-c1, c2 = st.columns(2)
-with c1:
-    kari = st.file_uploader("① 仮納品書（.xlsx / .xlsm）※複数選択可", type=["xlsx", "xlsm"],
-                            accept_multiple_files=True)
-with c2:
-    master = st.file_uploader("② 商品マスタ（.xlsm / .xlsx / .csv）", type=["xlsm", "xlsx", "csv"])
+kari = st.file_uploader("仮納品書（.xlsx / .xlsm）※複数選択可", type=["xlsx", "xlsm"],
+                        accept_multiple_files=True)
+st.caption("単価は商品マスタ（ロット別単価マスタ）から自動取得します。マスタのアップロードは不要です。")
 
-go = st.button("🚀 出荷連絡表を生成", type="primary", disabled=not (kari and master))
+go = st.button("🚀 出荷連絡表を生成", type="primary", disabled=not kari)
 
-if go and kari and master:
+if go and kari:
     try:
-        with st.spinner("解析中…（マスタが大きい場合は数十秒かかります）"):
-            groups, stats, debug = engine.generate(kari, master, master.name, date_label)
+        with st.spinner("商品マスタを取得中…"):
+            master_index, master_count = _fetch_master()
+    except Exception as e:
+        st.error(f"商品マスタの取得に失敗しました（Secrets の MASTER_GAS_URL / MASTER_GAS_TOKEN をご確認ください）: {e}")
+        st.stop()
+    try:
+        with st.spinner("解析中…"):
+            groups, stats, debug = engine.generate(kari, master_index, master_count, date_label)
     except Exception as e:
         st.error(f"処理でエラーが発生しました: {e}")
         st.stop()
@@ -137,7 +153,7 @@ if go and kari and master:
         st.markdown("**② 除外した行（資材／残資材・赤文字の控え）** — ※数量なしは除外せず、上の出荷連絡表に「要確認」で表示します")
         st.table(pd.DataFrame(debug["excluded"]) if debug["excluded"] else pd.DataFrame({"(なし)": []}))
 else:
-    st.info("①②の両方をアップロードすると「生成」できます。")
+    st.info("仮納品書をアップロードすると「生成」できます（単価は商品マスタから自動取得）。")
 
 # ===== 履歴（このセッションの直近3件・サーバー保存なし）=====
 _hist = st.session_state.get("history", [])
