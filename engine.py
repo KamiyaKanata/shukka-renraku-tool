@@ -735,6 +735,49 @@ def to_workbook(groups, *_ignore, **_kw):
     bio = io.BytesIO(); wb.save(bio); bio.seek(0)
     return bio
 
+# ================= 得意先ごと出荷一覧表（一覧表のGASへ送る行） =================
+def ichiran_rows(groups, items, date_override=""):
+    """詳細シートと同じ records から、一覧表に送る行を作る。返り値: (rows, problem)。
+    problem が空でなければ登録しない（画面に出す理由の文）。
+    登録キー＝出荷日|タブ名|正規化した製品名|ロット（aggregate(by_sheet=True) の集計単位と同じ）。
+    items は generate の debug["items"]（日付のないタブの行に印を付けるのに使う）。"""
+    override = (date_override or "").strip()
+    fixed_iso = None
+    if override:
+        d = parse_date(override)
+        if not d:
+            return [], ("出荷日「%s」を日付として読めないため、一覧表には登録していません"
+                        "（例: 2026-10-05）。" % override)
+        fixed_iso = d.isoformat()
+    elif not any(it.get("日付") for it in items):
+        # generate は日付が取れないと「今日」で代用する（クラウドは UTC）。一覧表には入れない
+        return [], ("仮納品書から出荷日が読み取れなかったため、一覧表には登録していません。"
+                    "サイドバーで出荷日を入力して、もう一度生成してください。")
+    # 自分のタブに日付がなく、ほかのタブの日付（代表日）で集計された明細
+    undated = {(it.get("シート", ""), normalize(it["製品名"]), it["Lot"])
+               for it in items if not it.get("日付")}
+    rows = []
+    for g in groups:
+        iso = fixed_iso or g["日付"]
+        for r in g["records"]:
+            tab = r.get("得意先", "")
+            nname = normalize(r["製品名"])
+            notes = [r["メモ"]] if r.get("メモ") else []
+            if not fixed_iso and (tab, nname, r["ロット"]) in undated:
+                notes.append("このタブに日付がなく、ほかのタブの日付で登録（要確認）")
+            q = r["数量"]
+            rows.append({
+                "key": "%s|%s|%s|%s" % (iso, tab, nname, r["ロット"]),
+                "出荷日": iso, "タブ": tab, "製品名": r["製品名"], "ロット": r["ロット"],
+                "出荷数": (None if q is None else _num_out(q)),
+                "単位": "kg" if r.get("bulk") else "",
+                "単価": r["単価"], "ケース": _cases_str(r["cases"]),
+                "宛先": _clean_dest(r.get("発送先", "")),
+                "商品CD": _pad_cd(r["商品CD"]), "試作番号": r["試作番号"],
+                "要確認": " / ".join(notes),
+            })
+    return rows, ""
+
 # ================= 一括処理 =================
 def generate(karinouhin_fileobjs, master_index, master_count=0, date_label=""):
     """複数の仮納品書を受け取り、出荷日ごとにグルーピングして出荷連絡表グループ群を返す。

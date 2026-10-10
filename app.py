@@ -13,6 +13,20 @@ importlib.reload(engine)  # Streamlit Cloudの旧モジュール残留対策（a
 st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", layout="wide")
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# スマホ対応（固定のCSSのみ。外から来た文字列は入れない）
+# - 表は横にスクロールさせる（画面幅に押し込むと製品名が1文字ずつ改行され、右の列が切れて見えなくなる）
+# - スマホ幅では件数の4つを2列×2段にし、タイトルを小さくする
+st.markdown("""<style>
+[data-testid="stTable"]{overflow-x:auto !important;-webkit-overflow-scrolling:touch}
+[data-testid="stTable"] table{min-width:720px}
+@media (max-width:640px){
+  h1{font-size:1.5rem !important;line-height:1.4 !important}
+  .st-key-metrics [data-testid="stHorizontalBlock"]{flex-wrap:wrap !important;gap:.25rem 1rem !important}
+  .st-key-metrics [data-testid="stColumn"]{flex:1 1 calc(50% - 1rem) !important;min-width:calc(50% - 1rem) !important;width:calc(50% - 1rem) !important}
+  .st-key-metrics [data-testid="stMetricValue"]{font-size:1.6rem !important}
+}
+</style>""", unsafe_allow_html=True)
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _fetch_master():
@@ -44,6 +58,69 @@ def _detail_preview_df(groups):
     return pd.DataFrame(rows) if rows else pd.DataFrame({"(なし)": []})
 
 
+_MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~"
+
+
+def _md_escape(s):
+    """GASから返った文字列（シート名・理由など）をマークダウンとして解釈させない。"""
+    return "".join("\\" + ch if ch in _MD_SPECIAL else ch for ch in str(s))
+
+
+def _register_ichiran(rows, files):
+    """得意先ごと出荷一覧表のGASへ送る。返り値はGASの応答（dict）。失敗も dict で返し、例外は外に出さない。"""
+    import json
+    import requests
+    try:
+        url = st.secrets["ICHIRAN_GAS_URL"]
+        token = st.secrets["ICHIRAN_GAS_TOKEN"]
+    except Exception:
+        return {"ok": False, "error": "一覧表の接続先（Secrets の ICHIRAN_GAS_URL / ICHIRAN_GAS_TOKEN）が未設定のため、登録していません。"}
+    body = json.dumps({"token": token, "rows": rows, "files": files, "appVersion": APP_VERSION}, ensure_ascii=False)
+    try:
+        r = requests.post(url, data=body.encode("utf-8"),
+                          headers={"Content-Type": "application/json; charset=utf-8"}, timeout=90)
+    except requests.Timeout:
+        return {"ok": False, "error": "一覧表からの応答が時間内に返りませんでした。登録できている可能性があります。"
+                                      "もう一度「生成」を押しても二重には入りません。"}
+    except requests.RequestException as e:
+        return {"ok": False, "error": "一覧表に接続できませんでした（%s）。" % type(e).__name__}
+    try:
+        data = r.json()
+    except ValueError:
+        return {"ok": False, "error": "一覧表から想定外の応答がありました（HTTP %s）。GASの公開設定（アクセス: 全員）を確認してください。"
+                                      % r.status_code}
+    if not isinstance(data, dict):
+        return {"ok": False, "error": "一覧表から想定外の応答がありました。"}
+    return data
+
+
+def _show_ichiran_result(res, latest=False):
+    """一覧表への登録結果を表示。登録できなかったときは必ず赤で出す（黙って欠けないように）。"""
+    if not res:
+        return
+    when = "（直前の生成分）" if latest else ""
+    if not res.get("ok"):
+        st.error("📒 得意先ごと出荷一覧表%sに登録できませんでした：%s" % (when, _md_escape(res.get("error", "不明なエラー"))))
+        return
+    s = res.get("summary", {})
+    det = res.get("details", {})
+    st.success("📒 得意先ごと出荷一覧表%sに登録しました：新規 %d 行／登録済みのため飛ばした %d 行"
+               % (when, s.get("added", 0), s.get("skipped", 0)))
+    c1, c2 = st.columns([4, 1])
+    c1.caption("登録先: %s（GAS %s）" % (_md_escape(res.get("sheetName", "")), _md_escape(res.get("codeVersion", ""))))
+    if str(res.get("url", "")).startswith("https://docs.google.com/"):
+        c2.link_button("一覧表を開く", res["url"])
+    if s.get("unassigned"):
+        st.warning("🔶 %d 行を「未振り分け」に置きました。一覧表で正しい得意先のシートへ行ごと移してください。" % s["unassigned"])
+        st.table(pd.DataFrame(det.get("unassigned", [])))
+    if s.get("flagged"):
+        st.warning("🔶 %d 行が「数量違いの再登録」です。一覧表の「要確認・メモ」を確かめてください。" % s["flagged"])
+        st.table(pd.DataFrame(det.get("flagged", [])))
+    if det.get("skipped"):
+        with st.expander("登録済みのため飛ばした行（%d 行）— 追加の出荷が混ざっていないか確認用" % len(det["skipped"])):
+            st.table(pd.DataFrame(det["skipped"]))
+
+
 def _push_history(filename, data, summary):
     """このセッションの直近3件を保持（新しい順）。サーバーには保存しない。"""
     hist = st.session_state.setdefault("history", [])
@@ -73,7 +150,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v5.0（単価をロット別単価マスタからGAS経由で自動取得・マスタUP不要）"
+APP_VERSION = "v5.1（生成と同時に得意先ごと出荷一覧表へ自動登録）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書をアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。単価は商品マスタから自動取得。｜{APP_VERSION}")
 
@@ -89,6 +166,7 @@ with st.sidebar:
         "・**赤文字（黒との二重記載の控え）は自動で除外**し二重計上しません\n"
         "・単価は品名＋数量（ロット閾値）で自動ひも付け\n"
         "・引けない／曖昧な行は **🔶要確認** として表示\n"
+        "・生成すると **得意先ごと出荷一覧表** にも自動で登録（同じ内容は二重に入りません）\n"
         "・直近3件は画面下の **履歴** から再ダウンロード可（このセッション内のみ）"
     )
     date_label = st.text_input("出荷日（空欄なら仮納品書から自動取得）", value="",
@@ -115,11 +193,12 @@ if go and kari:
         st.stop()
 
     dates = stats["日付一覧"]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("製品数", stats["出荷連絡表 行数"])
-    m2.metric("要確認 製品数", stats["要確認 行数"])
-    m3.metric("出荷日(シート)数", stats["シート数"])
-    m4.metric("仮納品書ファイル数", stats["ファイル数"])
+    with st.container(key="metrics"):  # key はスマホ用CSSの目印（.st-key-metrics）
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("製品数", stats["出荷連絡表 行数"])
+        m2.metric("要確認 製品数", stats["要確認 行数"])
+        m3.metric("出荷日(シート)数", stats["シート数"])
+        m4.metric("仮納品書ファイル数", stats["ファイル数"])
 
     _src = "仮納品書から自動取得" if stats.get("日付自動取得") else ("手入力" if date_label.strip() else "本日")
     st.caption(f"📅 出荷日: **{' / '.join(dates)}**（{_src}）／ マスタ商品数 {stats['マスタ商品数']}")
@@ -134,14 +213,29 @@ if go and kari:
     # ダウンロード（日付ごとのシートを持つ1ブック）
     bio = engine.to_workbook(groups)
     fname = f"出荷連絡表_{dates[0]}.xlsx" if len(dates) == 1 else f"出荷連絡表_{dates[0]}〜{dates[-1]}.xlsx"
+    # on_click="ignore": ダウンロードで画面を作り直さない（下の一覧表への登録を途中で止めないため）
     st.download_button("⬇️ 出荷連絡表をダウンロード", data=bio.getvalue(), file_name=fname,
-                       mime=_XLSX_MIME, type="primary")
+                       mime=_XLSX_MIME, type="primary", on_click="ignore")
     summary = f"{len(dates)}シート / {stats['出荷連絡表 行数']}行 / 要確認{stats['要確認 行数']}"
     _push_history(fname, bio.getvalue(), summary)
 
+    # 得意先ごと出荷一覧表への登録。出荷連絡表の作成とは独立させ、失敗しても上のダウンロードはそのまま使える
+    try:
+        ich_rows, ich_problem = engine.ichiran_rows(groups, debug["items"], date_label)
+        if ich_problem:
+            ich_res = {"ok": False, "error": ich_problem}
+        else:
+            with st.spinner("得意先ごと出荷一覧表に登録中…"):
+                ich_res = _register_ichiran(ich_rows, [getattr(f, "name", "") for f in kari])
+    except Exception as e:  # 一覧表側の不具合で出荷連絡表の画面まで止めない
+        ich_res = {"ok": False, "error": "登録の準備中に想定外のエラーが起きました（%s）。" % type(e).__name__}
+    st.session_state["ichiran_result"] = ich_res
+    _show_ichiran_result(ich_res)
+
     # プレビュー＝ダウンロードの「詳細シート」と同じ内容。印刷用シートはダウンロードにのみ入る。
     st.markdown("#### 内容プレビュー（＝詳細シートと同じ。ダウンロードには別途『印刷用シート（実物フォーマット）』も入ります）")
-    st.caption("出荷日: " + "、".join(f"{d}（{engine._weekday_jp(d)}）" for d in dates))
+    st.caption("出荷日: " + "、".join(f"{d}（{engine._weekday_jp(d)}）" for d in dates)
+               + "　※スマホでは表を横にスクロールできます")
     st.table(_detail_preview_df(groups).style.hide(axis="index"))
 
     with st.expander(f"🔍 解析の内訳（読めた明細 {len(debug['items'])} 件 / 除外 {len(debug['excluded'])} 件）— 「商品が乗らない」原因の確認用"):
@@ -154,6 +248,7 @@ if go and kari:
         st.table(pd.DataFrame(debug["excluded"]) if debug["excluded"] else pd.DataFrame({"(なし)": []}))
 else:
     st.info("仮納品書をアップロードすると「生成」できます（単価は商品マスタから自動取得）。")
+    _show_ichiran_result(st.session_state.get("ichiran_result"), latest=True)
 
 # ===== 履歴（このセッションの直近3件・サーバー保存なし）=====
 _hist = st.session_state.get("history", [])
