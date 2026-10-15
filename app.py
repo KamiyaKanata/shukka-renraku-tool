@@ -99,6 +99,9 @@ def _show_ichiran_result(res, latest=False):
     if not res:
         return
     when = "（直前の生成分）" if latest else ""
+    if res.get("skipped"):
+        st.warning("📒 得意先ごと出荷一覧表%sには登録していません（「得意先ごと出荷一覧表にも登録する」のチェックを外して生成したため）。" % when)
+        return
     if not res.get("ok"):
         st.error("📒 得意先ごと出荷一覧表%sに登録できませんでした：%s" % (when, _md_escape(res.get("error", "不明なエラー"))))
         return
@@ -150,7 +153,7 @@ def require_password():
 if not require_password():
     st.stop()
 
-APP_VERSION = "v5.1（生成と同時に得意先ごと出荷一覧表へ自動登録）"
+APP_VERSION = "v5.2（得意先ごと出荷一覧表への登録を選べる）"
 st.title("📦 出荷連絡表 自動生成（MVP）")
 st.caption(f"仮納品書をアップロードして「生成」を押すと、単価入りの出荷連絡表ができます。単価は商品マスタから自動取得。｜{APP_VERSION}")
 
@@ -166,7 +169,7 @@ with st.sidebar:
         "・**赤文字（黒との二重記載の控え）は自動で除外**し二重計上しません\n"
         "・単価は品名＋数量（ロット閾値）で自動ひも付け\n"
         "・引けない／曖昧な行は **🔶要確認** として表示\n"
-        "・生成すると **得意先ごと出荷一覧表** にも自動で登録（同じ内容は二重に入りません）\n"
+        "・生成すると **得意先ごと出荷一覧表** にも自動で登録（同じ内容は二重に入りません。入れたくないときは生成ボタンの上のチェックを外す）\n"
         "・直近3件は画面下の **履歴** から再ダウンロード可（このセッション内のみ）"
     )
     date_label = st.text_input("出荷日（空欄なら仮納品書から自動取得）", value="",
@@ -176,6 +179,11 @@ kari = st.file_uploader("仮納品書（.xlsx / .xlsm）※複数選択可", typ
                         accept_multiple_files=True)
 st.caption("単価は商品マスタ（ロット別単価マスタ）から自動取得します。マスタのアップロードは不要です。")
 
+# 一覧表への登録は初期値オン（付け忘れが請求漏れの元になるため）。昔の日付の印刷し直しなど、入れたくないときだけ外す
+register_ichiran = st.checkbox(
+    "得意先ごと出荷一覧表にも登録する", value=True, key="register_ichiran",
+    help="昔の日付の出荷連絡表を印刷し直すときなど、一覧表に入れたくないときだけ外してください。"
+         "チェックを入れたまま同じ仮納品書で2回生成しても、同じ内容は二重には入りません。")
 go = st.button("🚀 出荷連絡表を生成", type="primary", disabled=not kari)
 
 if go and kari:
@@ -222,7 +230,9 @@ if go and kari:
     # 得意先ごと出荷一覧表への登録。出荷連絡表の作成とは独立させ、失敗しても上のダウンロードはそのまま使える
     try:
         ich_rows, ich_problem = engine.ichiran_rows(groups, debug["items"], date_label)
-        if ich_problem:
+        if not register_ichiran:
+            ich_res = {"ok": False, "skipped": True}
+        elif ich_problem:
             ich_res = {"ok": False, "error": ich_problem}
         else:
             with st.spinner("得意先ごと出荷一覧表に登録中…"):
