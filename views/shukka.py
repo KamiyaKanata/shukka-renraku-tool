@@ -195,7 +195,7 @@ if go and kari:
             st.table(pd.DataFrame(debug["per_file"]))
         st.markdown("**① 仮納品書から読み込んだ明細（資材除外後）** — ここに無い商品は仮納品書の読み取りで拾えていません")
         st.table(pd.DataFrame(debug["items"]) if debug["items"] else pd.DataFrame({"(なし)": []}))
-        st.markdown("**② 除外した行（資材／残資材・赤文字の控え）** — ※数量なしは除外せず、上の出荷連絡表に「要確認」で表示します")
+        st.markdown("**② 除外した行（資材／残資材・赤文字の控え・応急処置タブの写し）** — ※数量なしは除外せず、上の出荷連絡表に「要確認」で表示します")
         st.table(pd.DataFrame(debug["excluded"]) if debug["excluded"] else pd.DataFrame({"(なし)": []}))
 else:
     st.info("仮納品書をアップロードすると「生成」できます（単価は商品マスタから自動取得）。")

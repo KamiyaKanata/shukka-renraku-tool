@@ -294,11 +294,13 @@ def _clean_dest(s):
 def _find_dest(rows, hidx, pcol):
     """ヘッダー前の行から発送先（宛先）を推定。会社名の行から、御中/様の行、または
     自社(サンブルーム等)の行の手前まで連結する。御中が無く2行に分かれても拾える。
-    例：ウェーブコーポレーション＋静岡工場御中 → ウェーブコーポレーション静岡工場。"""
+    例：ウェーブコーポレーション＋静岡工場御中 → ウェーブコーポレーション静岡工場。
+    品名の列より右は差出人の欄（OEM代行だと得意先の社名が入る）なので宛先にしない。
+    例：宛先の社名（B5）＋差出人の得意先（D7）→ 宛先の社名だけ。"""
     lines = []
     for row in rows[1:min(hidx, 9)]:
         texts, has_gochu, has_skip = [], False, False
-        for c in row:
+        for ci, c in enumerate(row):
             if c in (None, "") or isinstance(c, (datetime.date, datetime.datetime, int, float)):
                 continue
             if parse_date(c):
@@ -308,7 +310,7 @@ def _find_dest(rows, hidx, pcol):
                 continue
             if ("御中" in s) or ("様" in s):
                 has_gochu = True; texts.append(s)      # 御中/様の行までは宛先（御中は後で除去）
-            elif any(k in normalize(s) for k in _DEST_SKIP_NORM):
+            elif ci > pcol or any(k in normalize(s) for k in _DEST_SKIP_NORM):
                 has_skip = True                        # 自社・見出し・日付など
             else:
                 texts.append(s)
@@ -405,8 +407,26 @@ def parse_karinouhin(fileobj):
                 continue
             rec["数量"] = qty  # 数量が空でも除外しない（後段で「要確認」に回す）
             items.append(rec)
+    items, copies = _drop_copy_tabs(items)
+    excluded += copies
     kari_date = Counter(date_votes).most_common(1)[0][0] if date_votes else None
     return items, excluded, kari_date
+
+def _drop_copy_tabs(items):
+    """「応急処置」と名の付くタブは、送り状を分けて出すために本体のタブを写したもの（2026-09-07 で確認。請求書は本体の数量だけ）。
+    全行が同じファイルのほかのタブにある（品名・数量・ロットが同じ）ときだけ写しとして外す。1行でも違えば別の出荷として残す。"""
+    key = lambda it: (normalize(it["製品名"]), it["数量"], normalize(it["Lot"]))
+    is_copy_tab = lambda it: "応急処置" in normalize(it["シート"])
+    body = {key(it) for it in items if not is_copy_tab(it)}
+    tabs = defaultdict(list)
+    for it in items:
+        if is_copy_tab(it):
+            tabs[it["シート"]].append(it)
+    dropped = {t for t, rows in tabs.items() if all(key(r) in body for r in rows)}
+    keep = [it for it in items if it["シート"] not in dropped]
+    copies = [{**it, "日付": it["日付"].isoformat() if it["日付"] else "", "除外理由": "本体のタブの写し（応急処置）"}
+              for it in items if it["シート"] in dropped]
+    return keep, copies
 
 # ================= 集計・突合 =================
 def parse_case_terms(text):
