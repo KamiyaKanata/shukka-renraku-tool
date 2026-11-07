@@ -443,9 +443,12 @@ def aggregate(items, by_sheet=True):
             agg[key] = {"製品名": it["製品名"], "Lot": it["Lot"], "数量": 0.0,
                         "cases": defaultdict(float), "数量欠落": False,
                         "発送先": it.get("発送先", ""),   # 配送先（〇〇御中）
+                        "発送先一覧": [],                  # 合算した行の宛先すべて（印刷シートの送り先用）
                         "得意先": it.get("シート", "")}   # 得意先（仮納品書のシート名）
         if not agg[key]["発送先"] and it.get("発送先"):
             agg[key]["発送先"] = it["発送先"]
+        if it.get("発送先") and it["発送先"] not in agg[key]["発送先一覧"]:
+            agg[key]["発送先一覧"].append(it["発送先"])
         q = it["数量"]
         if q is None:
             agg[key]["数量欠落"] = True   # 数量が空の明細あり → 後段で要確認
@@ -457,7 +460,7 @@ def aggregate(items, by_sheet=True):
 
 # 詳細シートの列（メインの印刷シートとは別。金額は出さない）。先頭は得意先＝仮納品書シート名。
 # 日付・曜日は列にせず、タイトル横に表示する。
-DETAIL_COLS = ["得意先", "製品名", "ロット", "出荷数", "単価", "ケース", "商品CD", "試作番号", "要確認", "メモ"]
+DETAIL_COLS = ["得意先", "送り先", "製品名", "ロット", "出荷数", "単価", "ケース", "商品CD", "試作番号", "要確認", "メモ"]
 
 _WD_JP = "月火水木金土日"
 def _weekday_jp(date_str):
@@ -557,7 +560,8 @@ def build_records(agg, master_index):
         tanka = chosen["単価"] if chosen else None
         records.append({
             "製品名": a["製品名"], "name_main": name_main, "容量": yoryo, "bulk": bulk,
-            "発送先": a.get("発送先", ""), "得意先": a.get("得意先", ""), "ロット": a["Lot"],
+            "発送先": a.get("発送先", ""), "発送先一覧": a.get("発送先一覧", []),
+            "得意先": a.get("得意先", ""), "ロット": a["Lot"],
             "数量": (None if missing_all else a["数量"]),
             "cases": lines,
             "商品CD": chosen["商品CD"] if chosen else "",
@@ -592,6 +596,15 @@ def _qty_disp(rec):
     v = _num_out(rec["数量"])
     return ("%skg" % v) if rec["bulk"] else v
 
+def okurisaki(rec):
+    """送り先（薬事に渡す出荷連絡表に載せる）。送り状を読めるまでは仮納品書の宛先。合算行は「／」でつなぐ。"""
+    names = []
+    for d in (rec.get("発送先一覧") or [rec.get("発送先", "")]):
+        c = _clean_dest(d)
+        if c and c not in names:
+            names.append(c)
+    return "／".join(names)
+
 def detail_name(rec):
     """詳細シートの製品名セル。バルクは2行目に『〇〇へバルク出荷』(配送先)を付ける。"""
     if rec.get("bulk"):
@@ -600,7 +613,7 @@ def detail_name(rec):
     return rec["製品名"]
 
 # 実物テンプレ（事務所→工場）に合わせた列幅
-_PRINT_W = {"A": 39.1, "B": 13.9, "C": 15.8, "D": 7.9, "E": 5.4, "F": 7.9, "G": 6.7}
+_PRINT_W = {"A": 39.1, "B": 13.9, "C": 15.8, "D": 7.9, "E": 5.4, "F": 7.9, "G": 6.7, "H": 24}
 
 def _write_print_sheet(ws, records, date_label):
     """出荷連絡.xlsx と同じ印刷フォーマット（A4縦・1製品2行・容量右詰・ケースは入数×箱数C/S）。"""
@@ -615,6 +628,10 @@ def _write_print_sheet(ws, records, date_label):
     ws.page_setup.orientation = "portrait"
     ws.page_setup.paperSize = 9   # A4
     ws.page_setup.scale = 90
+    # 送り先の列（H）を足しても横は1ページに収める（縦は成り行き）
+    ws.sheet_properties.pageSetUpPr.fitToPage = True
+    ws.page_setup.fitToWidth = 1
+    ws.page_setup.fitToHeight = 0
     ws.page_margins.left = 0.59; ws.page_margins.right = 0.33
     ws.page_margins.top = 1.0; ws.page_margins.bottom = 0.45
     for col, w in _PRINT_W.items():
@@ -628,7 +645,7 @@ def _write_print_sheet(ws, records, date_label):
     ws["C1"].font = Font(name=_FONT); ws["C1"].alignment = cen
     ws["D1"] = "（%s）" % _weekday_jp(date_label)  # 日付の右に曜日
     ws["D1"].font = Font(name=_FONT); ws["D1"].alignment = Alignment(horizontal="left", vertical="center")
-    for col, h in zip("ABCD", ["製品名", "ロット", "出荷数", "ケース数"]):
+    for col, h in zip("ABCDH", ["製品名", "ロット", "出荷数", "ケース数", "送り先"]):
         c = ws["%s3" % col]; c.value = h
         c.font = Font(name=_FONT, bold=True); c.alignment = cen; c.border = border
     # 明細（1製品2行以上）
@@ -645,6 +662,7 @@ def _write_print_sheet(ws, records, date_label):
         ws.cell(r + 1, 1, sub).alignment = rgt
         ws.cell(r, 2, rec["ロット"]).alignment = cen
         ws.cell(r, 3, _qty_disp(rec)).alignment = rgt
+        ws.cell(r, 8, okurisaki(rec)).alignment = Alignment(horizontal="left", vertical="center", wrap_text=True)
         for i in range(nrows):
             rr = r + i
             ws.cell(rr, 5, "×").alignment = cen
@@ -659,8 +677,8 @@ def _write_print_sheet(ws, records, date_label):
         for i in range(nrows):
             rr = r + i
             first, last = (i == 0), (i == nrows - 1)
-            for cc in range(1, 8):
-                inner_dot = cc >= 4  # D-G は内部点線、A-C は内部なし
+            for cc in range(1, 9):
+                inner_dot = 4 <= cc <= 7  # D-G は内部点線、A-C と H(送り先) は内部なし
                 top = thin if first else (dott if inner_dot else no)
                 bot = thin if last else (dott if inner_dot else no)
                 cell = ws.cell(rr, cc)
@@ -670,10 +688,11 @@ def _write_print_sheet(ws, records, date_label):
         if nrows >= 2:
             ws.merge_cells(start_row=r, start_column=2, end_row=r + nrows - 1, end_column=2)
             ws.merge_cells(start_row=r, start_column=3, end_row=r + nrows - 1, end_column=3)
+            ws.merge_cells(start_row=r, start_column=8, end_row=r + nrows - 1, end_column=8)
         r += nrows
-    ws.print_area = "A1:G%d" % max(r - 1, 5)
+    ws.print_area = "A1:H%d" % max(r - 1, 5)
 
-_DETAIL_W = {"得意先": 20, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
+_DETAIL_W = {"得意先": 20, "送り先": 20, "製品名": 34, "ロット": 10, "出荷数": 9, "ケース": 16,
              "商品CD": 11, "試作番号": 16, "単価": 9, "要確認": 8, "メモ": 40}
 
 def _write_detail_sheet(ws, dated_records):
@@ -699,7 +718,7 @@ def _write_detail_sheet(ws, dated_records):
     i = 3
     for date_label, rec in dated_records:
         vals = {
-            "得意先": rec.get("得意先", ""),
+            "得意先": rec.get("得意先", ""), "送り先": okurisaki(rec),
             "製品名": detail_name(rec), "ロット": rec["ロット"],
             "出荷数": _qty_disp(rec),  # バルクは kg 付き
             "ケース": _cases_str(rec["cases"]),
@@ -772,7 +791,8 @@ def ichiran_rows(groups, items, date_override=""):
                 "出荷数": (None if q is None else _num_out(q)),
                 "単位": "kg" if r.get("bulk") else "",
                 "単価": r["単価"], "ケース": _cases_str(r["cases"]),
-                "宛先": _clean_dest(r.get("発送先", "")),
+                "宛先": _clean_dest(r.get("発送先", "")),   # GAS v1.2 以前の受け口用（v1.3 は送り先を使う）
+                "送り先": okurisaki(r),
                 "商品CD": _pad_cd(r["商品CD"]), "試作番号": r["試作番号"],
                 "要確認": " / ".join(notes),
             })
