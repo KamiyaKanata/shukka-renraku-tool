@@ -6,9 +6,13 @@ import datetime
 import importlib
 import streamlit as st
 import pandas as pd
+import hashlib
+import io
 import common
 import engine
+import okurijo
 importlib.reload(engine)  # Streamlit Cloudの旧モジュール残留対策（app.pyと常に同じ版に揃える）
+importlib.reload(okurijo)
 
 _XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
@@ -86,6 +90,51 @@ def _show_ichiran_result(res, latest=False):
             st.table(pd.DataFrame(det["skipped"]))
 
 
+def _okurijo_sig(pdf, kari_files):
+    """読み取り結果を使ってよいかの目印（送り状PDFと仮納品書が同じなら同じ値）"""
+    h = hashlib.sha256(pdf.getvalue())
+    for f in kari_files or []:
+        h.update(f.name.encode("utf-8"))
+        h.update(str(len(f.getvalue())).encode())
+    return h.hexdigest()
+
+
+def _ocr_via_gas(images, want_candidates):
+    """一覧表のGASに送り状の画像を送り、Google ドライブの文字読み取りの結果を受け取る"""
+    res = common.post_ichiran({"action": "ocr", "images": images, "wantCandidates": bool(want_candidates)}, timeout=180)
+    if not res.get("ok"):
+        raise RuntimeError(res.get("error", "不明なエラー"))
+    return {"texts": {r["key"]: r.get("text", "") for r in res.get("results", [])}, "candidates": res.get("candidates")}
+
+
+def _read_okurijo(pdf, kari_files):
+    """送り状PDFを読み、ページごとの結果（送り先の初期値つき）を session_state に置く"""
+    items = []
+    for f in kari_files:
+        it, _, _ = engine.parse_karinouhin(io.BytesIO(f.getvalue()))
+        items += it
+    tabs = okurijo.tabs_from_items(items)
+    bar = st.progress(0.0, text="送り状を読み取っています…")
+    rows = okurijo.read_okurijo(pdf.getvalue(), tabs, _ocr_via_gas,
+                                progress=lambda k, n: bar.progress(k / max(n, 1), text="送り状を読み取っています…（%d / %d ページ）" % (k + 1, n)))
+    bar.empty()
+    # 表の選択欄は前後の空白を出せないので、表示用の名前（空白を詰め、重なれば番号）と実際のタブ名を対応させる
+    labels = {}
+    for t in tabs:
+        lab = " ".join(t["タブ"].split()) or "(名前なし)"
+        base, i = lab, 2
+        while lab in labels:
+            lab = "%s（%d）" % (base, i)
+            i += 1
+        labels[lab] = t["タブ"]
+    to_label = {v: k for k, v in labels.items()}
+    for r in rows:
+        r["送り先"] = okurijo.default_dest(r)
+        r["タブ"] = to_label.get(r["タブ"], "")
+    st.session_state["okurijo"] = {"sig": _okurijo_sig(pdf, kari_files), "rows": rows, "labels": labels}
+    st.session_state.pop("okurijo_editor", None)
+
+
 def _push_history(filename, data, summary):
     """このセッションの直近3件を保持（新しい順）。サーバーには保存しない。"""
     hist = st.session_state.setdefault("history", [])
@@ -109,7 +158,7 @@ with st.sidebar:
         "・**赤文字（黒との二重記載の控え）は自動で除外**し二重計上しません\n"
         "・単価は品名＋数量（ロット閾値）で自動ひも付け\n"
         "・引けない／曖昧な行は **🔶要確認** として表示\n"
-        "・出荷連絡表の右端に **送り先**（今は仮納品書の宛先）を載せます\n"
+        "・出荷連絡表の右端に **送り先** を載せます（仮納品書の宛先。**送り状PDF** も入れて読み取ると、送り状の届先を優先）\n"
         "・生成すると **得意先ごと出荷一覧表** にも自動で登録（同じ内容は二重に入りません。入れたくないときは生成ボタンの上のチェックを外す）\n"
         "・直近3件は画面下の **履歴** から再ダウンロード可（このセッション内のみ）"
     )
@@ -119,6 +168,44 @@ with st.sidebar:
 kari = st.file_uploader("仮納品書（.xlsx / .xlsm）※複数選択可", type=["xlsx", "xlsm"],
                         accept_multiple_files=True)
 st.caption("単価は商品マスタ（ロット別単価マスタ）から自動取得します。マスタのアップロードは不要です。")
+
+# 送り状（任意）。読み取ると、仮納品書の宛先と違うタブは送り状の届先を送り先にする（10/21 の取り決め）
+okuri_pdf = st.file_uploader("送り状PDF（仮納品書と送り状をスキャンしたもの）※任意", type=["pdf"], key="okuri_pdf",
+                             help="入れて「送り状を読み取る」を押すと、送り状の届先を読み取って送り先にします。"
+                                  "仮納品書の宛先と違うときは送り状を優先し、メモに残します。")
+dest_override = None
+if okuri_pdf and kari:
+    if st.button("📮 送り状を読み取る", help="1ページ10秒ほどかかります"):
+        try:
+            _read_okurijo(okuri_pdf, kari)
+        except Exception as e:  # 読み取れなくても出荷連絡表は作れる（送り先は仮納品書の宛先のまま）
+            st.error("送り状を読み取れませんでした：%s（送り先は仮納品書の宛先のまま生成できます）" % _md_escape(str(e)))
+    ok = st.session_state.get("okurijo")
+    if ok and ok["sig"] == _okurijo_sig(okuri_pdf, kari):
+        rows = ok["rows"]
+        cnt = {k: sum(1 for r in rows if r["判定"] == k) for k in ("同じ", "違う", "読めない", "タブ不明")}
+        st.markdown("#### 送り状の読み取り結果")
+        st.caption("同じ %d ／ 違う %d ／ 読めない %d ／ タブ不明 %d（%d ページ）。「違う」は送り状の届先を送り先にします。"
+                   "直したいときは「送り先」を書き換え、タブが空の行は「タブ」を選んでください（空のままの行は使いません）。"
+                   % (cnt["同じ"], cnt["違う"], cnt["読めない"], cnt["タブ不明"], len(rows)))
+        edited = st.data_editor(
+            pd.DataFrame(rows)[["ページ", "判定", "タブ", "仮納品書の宛先", "送り状の届先", "送り先", "一致率"]],
+            key="okurijo_editor", hide_index=True, width="stretch",
+            disabled=["ページ", "判定", "仮納品書の宛先", "送り状の届先", "一致率"],
+            column_config={
+                "タブ": st.column_config.SelectboxColumn("タブ", options=[""] + list(ok["labels"]), help="この送り状がどの仮納品書のタブか"),
+                "送り先": st.column_config.TextColumn("送り先（使う値）", help="出荷連絡表と一覧表に載せる送り先"),
+                "一致率": st.column_config.NumberColumn("一致率", help="読めた名前と、得意先などの既知の名前の近さ。0 は初めて見る名前（要確認）", format="%.2f"),
+            })
+        merged = [dict(r, タブ=ok["labels"].get(e["タブ"] or "", ""), 送り先=e["送り先"] or "")
+                  for r, e in zip(rows, edited.to_dict("records"))]
+        dest_override = okurijo.decide(merged)
+        used = {m["タブ"] for m in merged}
+        missing = [lab for lab, t in ok["labels"].items() if t not in used]
+        if missing:
+            st.caption("送り状が見つからなかったタブ（仮納品書の宛先のまま）：" + "、".join(_md_escape(t) for t in missing))
+    elif ok:
+        st.caption("送り状PDFか仮納品書が変わりました。もう一度「送り状を読み取る」を押してください。")
 
 # 一覧表への登録は初期値オン（付け忘れが請求漏れの元になるため）。昔の日付の印刷し直しなど、入れたくないときだけ外す
 register_ichiran = st.checkbox(
@@ -136,7 +223,7 @@ if go and kari:
         st.stop()
     try:
         with st.spinner("解析中…"):
-            groups, stats, debug = engine.generate(kari, master_index, master_count, date_label)
+            groups, stats, debug = engine.generate(kari, master_index, master_count, date_label, dest_override=dest_override)
     except Exception as e:
         st.error(f"処理でエラーが発生しました: {e}")
         st.stop()

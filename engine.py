@@ -464,11 +464,14 @@ def aggregate(items, by_sheet=True):
                         "cases": defaultdict(float), "数量欠落": False,
                         "発送先": it.get("発送先", ""),   # 配送先（〇〇御中）
                         "発送先一覧": [],                  # 合算した行の宛先すべて（印刷シートの送り先用）
+                        "送り先メモ": "",                   # 送り状の届先を使ったときの元の宛先など
                         "得意先": it.get("シート", "")}   # 得意先（仮納品書のシート名）
         if not agg[key]["発送先"] and it.get("発送先"):
             agg[key]["発送先"] = it["発送先"]
         if it.get("発送先") and it["発送先"] not in agg[key]["発送先一覧"]:
             agg[key]["発送先一覧"].append(it["発送先"])
+        if it.get("送り先メモ") and it["送り先メモ"] not in agg[key]["送り先メモ"]:
+            agg[key]["送り先メモ"] = " / ".join(x for x in (agg[key]["送り先メモ"], it["送り先メモ"]) if x)
         q = it["数量"]
         if q is None:
             agg[key]["数量欠落"] = True   # 数量が空の明細あり → 後段で要確認
@@ -588,7 +591,7 @@ def build_records(agg, master_index):
             "試作番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
             "要確認": bool(flags),
-            "メモ": " / ".join([x for x in flags + ([note] if note else []) if x]),
+            "メモ": " / ".join([x for x in flags + [note, a.get("送り先メモ", "")] if x]),
         })
     records.sort(key=lambda r: _cd_sortkey(r["商品CD"]))  # 商品CD順（左右シート共通の並び）
     return records
@@ -819,7 +822,22 @@ def ichiran_rows(groups, items, date_override=""):
     return rows, ""
 
 # ================= 一括処理 =================
-def generate(karinouhin_fileobjs, master_index, master_count=0, date_label=""):
+def apply_dest_override(items, dest_override):
+    """送り状から決めた送り先でタブの宛先を置き換える。dest_override: {仮納品書のシート名: {"送り先": 名前, "メモ": 文}}。
+    仮納品書の宛先と違うときだけメモ（例「仮納品書の宛先：○○」）を残す。返り値: 置き換えた明細の数"""
+    n = 0
+    for it in items:
+        ov = (dest_override or {}).get(it.get("シート", ""))
+        if not ov or not str(ov.get("送り先", "")).strip():
+            continue
+        new = str(ov["送り先"]).strip()
+        if _clean_dest(new) != _clean_dest(it.get("発送先", "")):
+            it["送り先メモ"] = ov.get("メモ") or ("仮納品書の宛先：%s" % _clean_dest(it.get("発送先", "")))
+            it["発送先"] = new
+            n += 1
+    return n
+
+def generate(karinouhin_fileobjs, master_index, master_count=0, date_label="", dest_override=None):
     """複数の仮納品書を受け取り、出荷日ごとにグルーピングして出荷連絡表グループ群を返す。
     master_index は事前構築済みの単価索引（load_master_from_rows / load_master の返り値の索引）。
     返り値: (groups, stats, debug)"""
@@ -834,6 +852,7 @@ def generate(karinouhin_fileobjs, master_index, master_count=0, date_label=""):
         per_file.append({"ファイル": getattr(f, "name", "(不明)"),
                          "明細(資材除外後)": len(it), "除外": len(ex),
                          "日付": kd.isoformat() if kd else "(取得できず)"})
+    apply_dest_override(items, dest_override)  # 送り状から決めた送り先（無ければ何もしない）
     # 出荷日でグルーピング（手入力があれば全件をそのラベル1シートへ）
     all_dates = [it["日付"] for it in items if it.get("日付")]
     overall = Counter(all_dates).most_common(1)[0][0] if all_dates else None

@@ -4,7 +4,7 @@ import json
 
 import streamlit as st
 
-APP_VERSION = "v5.5（送り先の読み取りと照合のルールを修正）"
+APP_VERSION = "v5.6（送り状の読み取り）"
 
 _MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~"
 
