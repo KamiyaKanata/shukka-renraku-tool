@@ -30,7 +30,8 @@ with st.sidebar:
         "4. 赤い指摘が無くなったら **CSVをダウンロード** し、販売大将のデータ・インポート（売上伝票）で取り込む\n\n"
         "・伝票は「出荷日・得意先・仮納品書のタブ」ごとに分けています。まとめたいときは「伝票」の番号をそろえる"
         "（番号が同じでも、相手先NO・直送先・部門が違う行は自動で別の伝票になります）\n"
-        "・部門コードは今は仮です（本社＝000002・西九条から出荷した分とバルク＝000003）\n"
+        "・部門コードは、西九条から出荷した分とバルクを 000003（西九条工場）、ほかを 000002（工場）で入れています。"
+        "バルクでも工場で作った分は 000002 に直してください\n"
         "・一覧表は変わりません"
     )
 
@@ -65,7 +66,7 @@ if data:
     if not data["rows"]:
         st.info("この期間の行はありません。")
     else:
-        st.caption("部門コードは仮です（本社＝000002・西九条から出荷した分とバルク＝000003）。部門コードの一覧が届いたら差し替えます。")
+        st.caption("部門コード：%s。西九条から出荷した分とバルクは 000003、ほかは 000002 で入れています。" % uriage.BUMON_GUIDE)
         edited = st.data_editor(
             pd.DataFrame(data["rows"], columns=uriage.COLUMNS), key="uriage_editor", hide_index=True,
             num_rows="dynamic", width="stretch",
@@ -77,6 +78,7 @@ if data:
                 "原価単価": st.column_config.NumberColumn("原価単価", format="%g", help="運賃・資材などで使う"),
                 "得意先": st.column_config.TextColumn("得意先", help="確認用（CSVには入りません）"),
                 "商品名": st.column_config.TextColumn("商品名", help="確認用（CSVには入りません）"),
+                "部門コード": st.column_config.TextColumn("部門コード", help=uriage.BUMON_GUIDE),
                 "伝票備考": st.column_config.TextColumn("伝票備考", help="直送先など"),
                 "明細備考": st.column_config.TextColumn("明細備考", help="Lot.○○"),
                 "商品摘要": st.column_config.TextColumn("商品摘要", help="新単価・新製品など"),

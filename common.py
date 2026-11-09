@@ -4,7 +4,7 @@ import json
 
 import streamlit as st
 
-APP_VERSION = "v5.8（照合：請求しない出荷を対象外に）"
+APP_VERSION = "v5.8（照合：請求しない出荷を対象外に・部門コードの一覧を反映）"
 
 _MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~"
 
