@@ -4,7 +4,7 @@ import json
 
 import streamlit as st
 
-APP_VERSION = "v5.7（販売大将に取り込む売上データ）"
+APP_VERSION = "v5.8（照合：請求しない出荷を対象外に）"
 
 _MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~"
 
