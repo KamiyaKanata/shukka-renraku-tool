@@ -18,8 +18,10 @@ st.set_page_config(page_title="出荷連絡表 自動生成", page_icon="📦", 
 if not common.require_password():
     st.stop()
 
-st.navigation([
+page = st.navigation([
     st.Page("views/shukka.py", title="出荷連絡表を作る", icon="📦", default=True),
     st.Page("views/seikyu_shogo.py", title="請求書と照合", icon="🧾"),
     st.Page("views/hanbai_import.py", title="販売大将に取り込む", icon="📤"),
-]).run()
+])
+common.sheet_link()   # 左のメニューの下に、本番の一覧表へのリンク（Secrets にURLがあるときだけ）
+page.run()

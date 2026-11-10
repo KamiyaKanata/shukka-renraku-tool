@@ -4,7 +4,7 @@ import json
 
 import streamlit as st
 
-APP_VERSION = "v5.8（照合：請求しない出荷を対象外に・部門コードの一覧を反映）"
+APP_VERSION = "v5.9（左のメニューに本番の一覧表へのリンク）"
 
 _MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~"
 
@@ -28,6 +28,18 @@ def apply_css():
   .st-key-metrics [data-testid="stMetricValue"]{font-size:1.6rem !important}
 }
 </style>""", unsafe_allow_html=True)
+
+
+def sheet_link():
+    """左のメニューに本番の得意先ごと出荷一覧表へのリンクを出す（どの画面でも）。
+    URL は Secrets の ICHIRAN_SHEET_URL に置く（スプレッドシートのIDを公開リポジトリに置かないため）。無ければ何も出さない。
+    テスト画面にも本番の一覧表を貼る（2026-11-10 決定）ので、見出しに「本番」と書く。"""
+    try:
+        url = str(st.secrets["ICHIRAN_SHEET_URL"]).strip()
+    except Exception:
+        return
+    if url.startswith("https://docs.google.com/spreadsheets/"):
+        st.sidebar.link_button("得意先ごと出荷一覧表（本番）を開く", url, icon="📒", width="stretch")
 
 
 def require_password():
