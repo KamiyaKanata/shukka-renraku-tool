@@ -191,17 +191,27 @@ def tabs_from_items(items):
     return list(tabs.values())
 
 
-def read_okurijo(pdf_bytes, tabs, ocr, extra_candidates=(), progress=None):
-    """送り状PDFを読む。ocr(images, want_candidates) は {"texts": {key: 文字}, "candidates": [...]} を返す関数。
-    返り値: ページごとの行 [{"ページ", "タブ", "仮納品書の宛先", "送り状の届先", "一致率", "判定"}]"""
-    pages = page_images(pdf_bytes)
+def read_okurijo(pdfs, tabs, ocr, extra_candidates=(), progress=None):
+    """送り状PDFを読む。pdfs は [(ファイル名, bytes)]（得意先ごとに分かれたPDFを複数。2026-11-10）か、bytes 1つ。
+    ocr(images, want_candidates) は {"texts": {key: 文字}, "candidates": [...]} を返す関数。
+    返り値: ページごとの行 [{"ファイル", "ページ", "タブ", "仮納品書の宛先", "送り状の届先", "一致率", "判定"}]（ページはファイルごとに1から）"""
+    if isinstance(pdfs, (bytes, bytearray)):
+        pdfs = [("", pdfs)]
+    import fitz
+    total = 0
+    for _, b in pdfs:
+        total += fitz.open(stream=b, filetype="pdf").page_count
+    if total > MAX_PAGES:
+        raise ValueError("送り状PDFは合わせて %d ページまでにしてください（%d ページあります）" % (MAX_PAGES, total))
+    pages = [dict(p, file=name, fi=fi) for fi, (name, b) in enumerate(pdfs) for p in page_images(b)]
     cands = None
     rows = []
     for k, p in enumerate(pages):
         if progress:
             progress(k, len(pages))
         n = p["page"]
-        imgs = [{"key": "p%d_%s" % (n, x), "data": p[x]} for x in ("top", "l90", "l270")]
+        tag = ("p%d" % n) if p["fi"] == 0 else ("f%d_p%d" % (p["fi"], n))   # ファイルが違えば同じページ番号でも別のキー
+        imgs = [{"key": "%s_%s" % (tag, x), "data": p[x]} for x in ("top", "l90", "l270")]
         res = ocr(imgs, cands is None)
         texts = res.get("texts", {})
         if cands is None:
@@ -211,17 +221,17 @@ def read_okurijo(pdf_bytes, tabs, ocr, extra_candidates=(), progress=None):
                 if c and c not in seen:
                     seen.add(c)
                     cands.append(c)   # その日の宛先を先に置く（同じ一致率ならこちらを選ぶ）
-        tab, _ = match_tab(text_lines(texts.get("p%d_top" % n, "")), tabs)
+        tab, _ = match_tab(text_lines(texts.get("%s_top" % tag, "")), tabs)
         best = None   # 2向きのうち、既知の名前に一番よく寄る方（同じなら送り状らしく読めた方）
         for x in ("l90", "l270"):
-            t = texts.get("p%d_%s" % (n, x), "")
+            t = texts.get("%s_%s" % (tag, x), "")
             name, r = pick_todoke_text(t, cands)
             key = (r, label_score(text_lines(t)))
             if name and (best is None or key > best[0]):
                 best = (key, name, r)
         name, r = (best[1], best[2]) if best else ("", 0.0)
         atena = tab["宛先"] if tab else ""
-        rows.append({"ページ": n, "タブ": tab["タブ"] if tab else "", "仮納品書の宛先": atena,
+        rows.append({"ファイル": p["file"], "ページ": n, "タブ": tab["タブ"] if tab else "", "仮納品書の宛先": atena,
                      "送り状の届先": name, "一致率": round(r, 2),
                      "判定": ("タブ不明" if not tab else judge(atena, name))})
     return rows

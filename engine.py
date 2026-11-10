@@ -10,6 +10,7 @@
 - 数量帯: ロット欄の下限数値を閾値とし「数量以下で最大の閾値」を採用。
          最小閾値未満なら最小単価を採用しつつ「要確認」。
 - 価格履歴: 同条件で複数あれば最新の価格更新日を採用。
+         選んだ段の行に更新日が無く、数量以下の段に更新日のある行があれば、そちらを優先（2026-11-10）。
 - 名前衝突(正規化後に別商品CDが複数): 「要確認」。
 - 単価が引けない/曖昧は「要確認」で別掲（黙って誤単価を出さない）。
 """
@@ -243,6 +244,16 @@ def select_price(entries, qty):
     if len(cds) > 1:
         flags.append("商品CD複数 %s →名前衝突(要確認)" % sorted(cds))
     chosen = max(cands, key=lambda e: e["価格更新"] or datetime.date(1900, 1, 1))
+    # 選んだ行に単価更新日が無く、数量以下の段に単価更新日のある行があれば、そちらから選び直す（2026-11-10 先方の依頼）。
+    # 見積の反映は「追加」で運用してきたため、新しい見積の段（例 15kg以上）の上に古い段（16kg以上・日付なし）が残っていることがある。
+    # 「日付のある行だけ使う」にはしない：今の単価の段に日付が無く、上の段にだけ古い日付がある商品がある（8〜9月の請求書で確認）
+    if thresholds and not chosen["価格更新"]:
+        dated = [e for e in es if e["価格更新"] and e["ロット下限"] is not None and e["ロット下限"] <= qty]
+        if dated:
+            t2 = max(e["ロット下限"] for e in dated)
+            new = max((e for e in dated if e["ロット下限"] == t2), key=lambda e: e["価格更新"])
+            chosen = dict(new, メモ="単価更新日のある単価を優先（更新日なしの %s以上 %s円は使わず）"
+                                   % (_num_out(chosen_t), "{:,}".format(int(chosen["単価"]))))
     return chosen, flags
 
 # ================= 仮納品書 読み込み =================
@@ -290,6 +301,16 @@ def _clean_dest(s):
     s = unicodedata.normalize("NFKC", str(s or ""))
     s = re.sub(r"(株式会社|有限会社|合同会社|合資会社|㈱|㈲|\(株\)|（株）)", "", s)
     return s.replace("御中", "").strip("　 ").strip()
+
+def _disp_dest(s):
+    """送り先の表示用。法人格は残し、株式会社→㈱・有限会社→㈲ に縮める（2026-11-10 先方の依頼「㈱でもよいので表示」）。
+    前株・後株の位置は元のまま。御中は外し、「様」は今までどおり残す（「藤原良太様」など人名の宛先があるため）。
+    比べるときは _clean_dest を使う"""
+    s = unicodedata.normalize("NFKC", str(s or "")).replace("御中", " ")
+    s = re.sub(r"株式会社|\(株\)", "㈱", s)
+    s = re.sub(r"有限会社|\(有\)", "㈲", s)
+    s = re.sub(r"\s*(㈱|㈲)\s*", r"\1", s)   # 「株式会社　さかえ」→「㈱さかえ」
+    return s.strip()
 
 def _find_dest(rows, hidx, pcol):
     """ヘッダー前の行から発送先（宛先）を推定。会社名の行から、御中/様の行、または
@@ -591,7 +612,7 @@ def build_records(agg, master_index):
             "試作番号": chosen["試作番号"] if chosen else "",
             "単価": int(tanka) if tanka else None,
             "要確認": bool(flags),
-            "メモ": " / ".join([x for x in flags + [note, a.get("送り先メモ", "")] if x]),
+            "メモ": " / ".join([x for x in flags + [note, (chosen or {}).get("メモ", ""), a.get("送り先メモ", "")] if x]),
         })
     records.sort(key=lambda r: _cd_sortkey(r["商品CD"]))  # 商品CD順（左右シート共通の並び）
     return records
@@ -621,10 +642,11 @@ def _qty_disp(rec):
 
 def okurisaki(rec):
     """送り先（薬事に渡す出荷連絡表に載せる）。送り状を読めるまでは仮納品書の宛先。合算行は「／」でつなぐ。"""
-    names = []
+    names, seen = [], set()
     for d in (rec.get("発送先一覧") or [rec.get("発送先", "")]):
-        c = _clean_dest(d)
-        if c and c not in names:
+        c, k = _disp_dest(d), _clean_dest(d)   # 表示は㈱つき。重なりは法人格を外して判定
+        if c and k not in seen:
+            seen.add(k)
             names.append(c)
     return "／".join(names)
 

@@ -25,7 +25,7 @@ DOC_FIELDS = ["売上日", "得意先コード", "部門コード", "伝票備�
 
 def _norm(s):
     s = unicodedata.normalize("NFKC", str(s or ""))
-    s = re.sub(r"株式会社|有限会社|合同会社|\(株\)|㈱|御中|様", "", s)
+    s = re.sub(r"株式会社|有限会社|合同会社|\(株\)|\(有\)|㈱|㈲|御中|様", "", s)   # NFKC で ㈱→(株)・㈲→(有)
     return re.sub(r"[\s・･.\-ー—―]", "", s).upper()
 
 
@@ -33,6 +33,12 @@ def _same_party(a, b):
     """送り先が得意先そのものか（法人格・敬称・記号の違いは無視。片方がもう片方に含まれれば同じ）"""
     x, y = _norm(a), _norm(b)
     return bool(x and y) and (x in y or y in x)
+
+
+def _full_corp(s):
+    """伝票備考用。送り先の ㈱・㈲ を「株式会社」「有限会社」に戻す（販売大将の伝票備考は「株式会社○○倉庫様直送」の形）"""
+    s = unicodedata.normalize("NFKC", str(s or ""))
+    return s.replace("(株)", "株式会社").replace("(有)", "有限会社")
 
 
 def _num(v):
@@ -76,7 +82,7 @@ def edit_rows(gas_rows):
             "原価単価": 0,
             "相手先NO": "",
             "部門コード": BUMON_NISHIKUJO if ("西九条" in str(r.get("ファイル") or "") or str(r.get("単位") or "").lower() == "kg") else BUMON_HONSHA,
-            "伝票備考": ("%s様直送" % re.sub(r"(様|御中)$", "", dest)) if dest and not _same_party(dest, cust) else "",
+            "伝票備考": ("%s様直送" % re.sub(r"(様|御中)$", "", _full_corp(dest))) if dest and not _same_party(dest, cust) else "",
             "明細備考": ("Lot.%s" % lot) if lot else "",
             "商品摘要": "",
         })

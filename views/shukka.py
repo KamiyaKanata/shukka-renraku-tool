@@ -90,9 +90,12 @@ def _show_ichiran_result(res, latest=False):
             st.table(pd.DataFrame(det["skipped"]))
 
 
-def _okurijo_sig(pdf, kari_files):
+def _okurijo_sig(pdfs, kari_files):
     """読み取り結果を使ってよいかの目印（送り状PDFと仮納品書が同じなら同じ値）"""
-    h = hashlib.sha256(pdf.getvalue())
+    h = hashlib.sha256()
+    for p in pdfs or []:
+        h.update(p.name.encode("utf-8"))
+        h.update(hashlib.sha256(p.getvalue()).digest())
     for f in kari_files or []:
         h.update(f.name.encode("utf-8"))
         h.update(str(len(f.getvalue())).encode())
@@ -107,15 +110,15 @@ def _ocr_via_gas(images, want_candidates):
     return {"texts": {r["key"]: r.get("text", "") for r in res.get("results", [])}, "candidates": res.get("candidates")}
 
 
-def _read_okurijo(pdf, kari_files):
-    """送り状PDFを読み、ページごとの結果（送り先の初期値つき）を session_state に置く"""
+def _read_okurijo(pdfs, kari_files):
+    """送り状PDF（複数可）を読み、ページごとの結果（送り先の初期値つき）を session_state に置く"""
     items = []
     for f in kari_files:
         it, _, _ = engine.parse_karinouhin(io.BytesIO(f.getvalue()))
         items += it
     tabs = okurijo.tabs_from_items(items)
     bar = st.progress(0.0, text="送り状を読み取っています…")
-    rows = okurijo.read_okurijo(pdf.getvalue(), tabs, _ocr_via_gas,
+    rows = okurijo.read_okurijo([(p.name, p.getvalue()) for p in pdfs], tabs, _ocr_via_gas,
                                 progress=lambda k, n: bar.progress(k / max(n, 1), text="送り状を読み取っています…（%d / %d ページ）" % (k + 1, n)))
     bar.empty()
     # 表の選択欄は前後の空白を出せないので、表示用の名前（空白を詰め、重なれば番号）と実際のタブ名を対応させる
@@ -131,7 +134,7 @@ def _read_okurijo(pdf, kari_files):
     for r in rows:
         r["送り先"] = okurijo.default_dest(r)
         r["タブ"] = to_label.get(r["タブ"], "")
-    st.session_state["okurijo"] = {"sig": _okurijo_sig(pdf, kari_files), "rows": rows, "labels": labels}
+    st.session_state["okurijo"] = {"sig": _okurijo_sig(pdfs, kari_files), "rows": rows, "labels": labels}
     st.session_state.pop("okurijo_editor", None)
 
 
@@ -158,7 +161,8 @@ with st.sidebar:
         "・**赤文字（黒との二重記載の控え）は自動で除外**し二重計上しません\n"
         "・単価は品名＋数量（ロット閾値）で自動ひも付け\n"
         "・引けない／曖昧な行は **🔶要確認** として表示\n"
-        "・出荷連絡表の右端に **送り先** を載せます（仮納品書の宛先。**送り状PDF** も入れて読み取ると、送り状の届先を優先）\n"
+        "・出荷連絡表の右端に **送り先** を載せます（仮納品書の宛先。**送り状PDF**（複数可）も入れて読み取ると、送り状の届先を優先）\n"
+        "・単価は、選んだ段に単価更新日が無く、数量以下の段に更新日のある単価があれば、そちらを使います（メモに残します）\n"
         "・生成すると **得意先ごと出荷一覧表** にも自動で登録（同じ内容は二重に入りません。入れたくないときは生成ボタンの上のチェックを外す）\n"
         "・直近3件は画面下の **履歴** から再ダウンロード可（このセッション内のみ）"
     )
@@ -170,9 +174,10 @@ kari = st.file_uploader("仮納品書（.xlsx / .xlsm）※複数選択可", typ
 st.caption("単価は商品マスタ（ロット別単価マスタ）から自動取得します。マスタのアップロードは不要です。")
 
 # 送り状（任意）。読み取ると、仮納品書の宛先と違うタブは送り状の届先を送り先にする（10/21 の取り決め）
-okuri_pdf = st.file_uploader("送り状PDF（仮納品書と送り状をスキャンしたもの）※任意", type=["pdf"], key="okuri_pdf",
+okuri_pdf = st.file_uploader("送り状PDF（仮納品書と送り状をスキャンしたもの）※任意・複数選択可", type=["pdf"], key="okuri_pdfs",
+                             accept_multiple_files=True,
                              help="入れて「送り状を読み取る」を押すと、送り状の届先を読み取って送り先にします。"
-                                  "仮納品書の宛先と違うときは送り状を優先し、メモに残します。")
+                                  "仮納品書の宛先と違うときは送り状を優先し、メモに残します。得意先ごとに分かれたPDFもまとめて入れられます。")
 dest_override = None
 if okuri_pdf and kari:
     if st.button("📮 送り状を読み取る", help="1ページ10秒ほどかかります"):
@@ -189,9 +194,9 @@ if okuri_pdf and kari:
                    "直したいときは「送り先」を書き換え、タブが空の行は「タブ」を選んでください（空のままの行は使いません）。"
                    % (cnt["同じ"], cnt["違う"], cnt["読めない"], cnt["タブ不明"], len(rows)))
         edited = st.data_editor(
-            pd.DataFrame(rows)[["ページ", "判定", "タブ", "仮納品書の宛先", "送り状の届先", "送り先", "一致率"]],
+            pd.DataFrame(rows)[["ファイル", "ページ", "判定", "タブ", "仮納品書の宛先", "送り状の届先", "送り先", "一致率"]],
             key="okurijo_editor", hide_index=True, width="stretch",
-            disabled=["ページ", "判定", "仮納品書の宛先", "送り状の届先", "一致率"],
+            disabled=["ファイル", "ページ", "判定", "仮納品書の宛先", "送り状の届先", "一致率"],
             column_config={
                 "タブ": st.column_config.SelectboxColumn("タブ", options=[""] + list(ok["labels"]), help="この送り状がどの仮納品書のタブか"),
                 "送り先": st.column_config.TextColumn("送り先（使う値）", help="出荷連絡表と一覧表に載せる送り先"),

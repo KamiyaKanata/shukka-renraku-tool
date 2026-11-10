@@ -4,7 +4,7 @@ import json
 
 import streamlit as st
 
-APP_VERSION = "v5.9（左のメニューに本番の一覧表へのリンク）"
+APP_VERSION = "v6.0（送り先に㈱・送り状PDFを複数・単価更新日を優先）"
 
 _MD_SPECIAL = "\\`*_{}[]()#+-.!|<>~"
 
